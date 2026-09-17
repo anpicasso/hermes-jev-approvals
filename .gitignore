@@ -1,0 +1,9 @@
+# Local benchmark artefacts — these contain real commands from real sessions,
+# which include live credentials. Never commit them.
+pool.json
+real_*.json
+bench_cases.json
+bench_results/
+*.log
+__pycache__/
+*.pyc
