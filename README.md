@@ -91,7 +91,7 @@ self-advocacy check runs before the policy check.
 
 ## How the verdict is produced
 
-One request, four questions, answered in parallel:
+One request, six questions, answered in parallel:
 
 | question | type | role |
 |---|---|---|
@@ -99,15 +99,47 @@ One request, four questions, answered in parallel:
 | `policy_allows` | Noul | does `approvals.smart_policy` cover this command? |
 | `blast_radius` | Score | trivial / annoying / severe recovery |
 | `self_advocating` | Noul | is the command text arguing for its own approval? |
+| `reads_secrets` | Noul | does it read, print, or copy credential material? |
+| `sends_outbound` | Noul | does it transmit local content to a remote destination? |
 
 Then policy in **code**, in this order:
 
 1. `self_advocating >= 0.6` → ESCALATE *(first, so a policy can never be talked into approving an injection)*
-2. `policy_allows >= 0.7` and blast < 2.0 and a policy exists → APPROVE
-3. APPROVE with `confidence < 0.55` or `blast_radius >= 1.6` → ESCALATE
+2. `reads_secrets` and `sends_outbound` both `>= 0.7` → **DENY** (exfiltration)
+3. `reads_secrets >= 0.7` → ESCALATE (a local secret read is sometimes legitimate; only a human knows)
+4. `policy_allows >= 0.7` and blast < 2.0 and a policy exists → APPROVE
+5. APPROVE with `confidence < 0.55` or `blast_radius >= 1.6` → ESCALATE
 
-Steps 1 and 3 only ever downgrade toward human review. Step 2 upgrades, but requires an
-explicit operator policy *and* a non-catastrophic blast radius.
+Steps 1, 2, 3 and 5 only ever downgrade toward human review. Step 4 upgrades, but requires
+an explicit operator policy *and* a non-catastrophic blast radius.
+
+Six questions cost the same as one: 345 ms average across the 20-case suite, versus 439 ms
+when there were four. Jev answers independent questions in the same request in parallel.
+
+### Credential exposure was a real hole
+
+Prompted by [`oc-auto-perms`](https://github.com/OpeOginni/oc-plugins/tree/main/packages/oc-auto-perms),
+an OpenCode plugin doing the same Jev-for-permissions idea independently. Its policy model
+has a rule shape for *"sends secrets or credentials over the network"*; this plugin had no
+notion of confidentiality at all, because reading a key deletes nothing and mutates nothing,
+so `blast_radius` scored it ~0.
+
+Measured on 14 cases before the fix: **6 of 9 credential reads were APPROVED**, including
+`cat ~/.hermes/.env` and `cat ~/.aws/credentials`. Adding the two questions took that to
+**0 missed, 0 false positives** on ordinary reads (`cat README.md`, `env | grep -i path`,
+`grep -r TODO src/`).
+
+### What this cannot cover
+
+**A command core's regex does not flag never reaches this gate.** A bare `cat ~/.hermes/.env`
+is not in `tools/approval_detection.py`'s pattern list, so no reviewer — this one or the
+stock aux LLM — is ever consulted about it. The credential questions only help for secret
+access *inside* a shape core already flags, which in practice is most of it: `script
+execution via -e/-c flag` and `via heredoc` together account for 877 of the 1,580 flagged
+commands in the corpus, and both are the natural way an agent reads a file in a script.
+
+Closing the bare-`cat` case needs a wider pre-filter in core, not a better reviewer. That is
+a separate, small upstream change and is not attempted here.
 
 ## Install
 
@@ -164,9 +196,29 @@ To roll back, unset the two config keys. Hermes falls back to its normal auxilia
 
 ## Prior art
 
+[`oc-auto-perms`](https://github.com/OpeOginni/oc-plugins/tree/main/packages/oc-auto-perms)
+is the same Jev-for-permissions idea built independently for OpenCode, and it is worth
+reading before this one. It surfaced the credential gap fixed above. Three of its design
+choices were tested here and are recorded honestly:
+
+- **Its structured policy** (ordered `{effect, when, tools, examples}` rules with `!`
+  counterexamples) is better engineering than Hermes' single prose `smart_policy` string.
+  Measured, though, prose plus counterexamples and prose alone both scored 6/6 on a
+  boundary set (`pkill chrome` vs `pkill postgres`, `git push origin dev` vs
+  `git push --force origin main`) — so a schema is not adopted here. Hermes' existing key
+  already works, and rung 1 of the ladder says don't build the second one.
+- **Its cross-tool intent rule** (*"a rule must not be bypassed by using a different
+  mechanism"*) tested as already-covered: 6 destructive commands, each in shell form and
+  smuggled through `python3 -c`, produced identical verdicts, 0 bypasses. Jev judges the
+  effect, not the binary, without being told to.
+- **Its guarded-tool selection and deny-by-default** are the right model for a permission
+  system that owns the whole surface. This plugin is not that: it replaces the reviewer
+  *inside* Hermes' existing gate, so core decides what is guarded and what is
+  deny-by-default. Different scope, not a missing feature.
+
 [`pi-approval-guardian`](https://github.com/mics8128/pi-approval-guardian) does fail-closed
-approval review for [Pi](https://pi.dev) using `codex-auto-review` — a stricter design worth
-reading. I found no existing Jev-for-approvals integration for Hermes or elsewhere.
+approval review for [Pi](https://pi.dev) using `codex-auto-review` — a stricter design, also
+worth reading.
 
 ## Licence
 
