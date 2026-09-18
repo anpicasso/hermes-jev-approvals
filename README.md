@@ -164,7 +164,7 @@ Model-provider plugins register at import, so no `plugins enable` is needed. Ver
 
 ```bash
 hermes plugins doctor ~/.hermes/plugins/jev-approval-provider --ci
-python3 ~/.hermes/plugins/jev-approval-provider/test_provider.py
+python3 ~/.hermes/plugins/jev-approval-provider/tests/test_provider.py
 ```
 
 **Plugins are profile-scoped** — `$HERMES_HOME/plugins` is per-profile, so repeat the

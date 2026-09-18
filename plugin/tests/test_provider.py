@@ -21,8 +21,8 @@ sys.path.insert(0, str(HERMES_SRC))
 
 # Import the plugin the way discovery does (module-level register_provider).
 import importlib.util, pathlib
-_HERE = pathlib.Path(__file__).resolve().parent
-spec = importlib.util.spec_from_file_location("jev_approval_provider", _HERE / "__init__.py")
+_PLUGIN_DIR = pathlib.Path(__file__).resolve().parent.parent
+spec = importlib.util.spec_from_file_location("jev_approval_provider", _PLUGIN_DIR / "__init__.py")
 assert spec and spec.loader
 plug = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(plug)

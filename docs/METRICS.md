@@ -156,7 +156,7 @@ deletes, and remote git operations; the aux LLM stricter on scripts it cannot fu
 
 ## Provider seam
 
-`plugin/test_provider.py`, 14 commands + 4 contract checks, all passing:
+`plugin/tests/test_provider.py`, 14 commands + 4 contract checks, all passing:
 
 - `get_provider_profile("jev-approval")` returns the profile (real discovery — `plugins
   doctor` alone does not prove this)
