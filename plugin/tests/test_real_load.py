@@ -90,6 +90,37 @@ for label, base_url, model in (
     print(f"{label:<16} -> JevClient  model={final_model!r}  "
           f"route_default={client._default_model()!r}")
 
+# 3b. THE DOCUMENTED CONFIG SHAPE. A key alongside base_url in auxiliary.<task> config
+# collapses the provider to "custom" (auxiliary_client.py: `if cfg_base_url and
+# cfg_api_key`), which bypasses this plugin entirely — so the OpenRouter config must carry
+# base_url and NO api_key/key_env, and the plugin resolves the key from the openrouter
+# credential pool itself. This asserts the README stays true.
+import agent.auxiliary_client as _aux  # noqa: E402
+from agent.auxiliary_client import _resolve_task_provider_model  # noqa: E402
+
+_real_task_cfg = _aux._get_auxiliary_task_config
+_OR = "https://openrouter.ai/api/alpha"
+try:
+    for label, task_cfg, want in (
+        ("base_url, no key (documented)",
+         {"provider": PROVIDER, "model": "~typesafe/jev-latest", "base_url": _OR}, PROVIDER),
+        # An inline api_key is the unambiguous case: `key_env` only resolves to a value
+        # when that variable is actually exported, so it collapses the provider only on
+        # machines where it is set — a nastier, environment-dependent version of the same
+        # bug. Neither belongs in the documented config.
+        ("base_url + api_key (must NOT be documented)",
+         {"provider": PROVIDER, "model": "~typesafe/jev-latest", "base_url": _OR,
+          "api_key": "sk-or-inline"}, "custom"),
+        ("no base_url (typesafe direct)",
+         {"provider": PROVIDER, "model": "jev-latest"}, PROVIDER),
+    ):
+        _aux._get_auxiliary_task_config = lambda _t, _c=task_cfg: _c
+        got = _resolve_task_provider_model("approval")[0]
+        assert got == want, f"{label}: provider resolved to {got!r}, expected {want!r}"
+        print(f"  {label:<44} -> {got}")
+finally:
+    _aux._get_auxiliary_task_config = _real_task_cfg
+
 # 4. the host -> endpoint mapping, including that an unknown host is not the alpha route
 import importlib.util  # noqa: E402
 import pathlib  # noqa: E402
@@ -108,5 +139,48 @@ assert mod._route_for("https://example.com/v1")[0] == "/systemone"
 # the OpenRouter model list must carry the filter, or it pulls the whole 447-model catalogue
 assert "output_modalities=decisions" in mod._route_for("https://openrouter.ai/api/alpha")[1]
 print("route_for: typesafe -> /systemone, openrouter -> /decisions, unknown -> /systemone")
+
+# 5. the optional `settings.key_env`: aggregator routes only, pool wins, bad values are inert
+_real_setting = mod._setting
+_real_pool = mod._key_from_runtime_provider
+_real_dotenv = mod._key_from_dotenv
+try:
+    # the aggregator table drives it, and TypeSafe direct is NOT an aggregator
+    assert mod._aggregator_for("openrouter.ai") == ("openrouter", "OPENROUTER_API_KEY")
+    assert mod._aggregator_for("api.typesafe.ai") is None
+    assert mod._aggregator_for("example.com") is None
+
+    # settings.key_env names the variable for an aggregator whose key is NOT in a pool
+    mod._setting = lambda key, default=None: "MY_AGG_KEY" if key == "key_env" else default
+    mod._key_from_runtime_provider = lambda _p: ""          # no pool credential
+    os.environ["MY_AGG_KEY"] = "sk-from-custom-env-var"
+    assert mod._api_key("https://openrouter.ai/api/alpha") == "sk-from-custom-env-var"
+
+    # an unset/blank setting falls back to the aggregator's default variable
+    mod._setting = _real_setting
+    os.environ["OPENROUTER_API_KEY"] = "sk-from-default-var"
+    assert mod._api_key("https://openrouter.ai/api/alpha") == "sk-from-default-var"
+
+    # ...and the TypeSafe route must ignore all of it. Its own resolvers are stubbed empty
+    # so the assertion is about THIS env var, not whatever the machine's pool happens to hold.
+    mod._key_from_dotenv = lambda: ""
+    os.environ["TYPESAFE_API_KEY"] = "sk-typesafe"
+    assert mod._api_key("") == "sk-typesafe"
+    assert mod._api_key("https://api.typesafe.ai/v1") == "sk-typesafe"
+
+    # a garbage setting must not break the default route
+    mod._setting = lambda key, default=None: 12345 if key == "key_env" else default
+    try:
+        mod._api_key("https://openrouter.ai/api/alpha")
+    except RuntimeError:
+        pass  # no credential is the correct outcome, not a crash
+    assert mod._api_key("") == "sk-typesafe", "a bad setting leaked into the TypeSafe route"
+finally:
+    mod._setting = _real_setting
+    mod._key_from_runtime_provider = _real_pool
+    mod._key_from_dotenv = _real_dotenv
+    for _v in ("MY_AGG_KEY", "OPENROUTER_API_KEY", "TYPESAFE_API_KEY"):
+        os.environ.pop(_v, None)
+print("settings.key_env: aggregator-only, pool first, default var, bad value inert")
 
 print("\nboth registries have the provider, and both routes build our client")

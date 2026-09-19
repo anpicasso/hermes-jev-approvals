@@ -257,7 +257,7 @@ process environment.
 ### Or route through OpenRouter
 
 OpenRouter hosts the same model at the same published price, on its own decisions endpoint.
-Same provider, different `base_url` — no plugin-specific config:
+Same provider, different `base_url`:
 
 ```yaml
 auxiliary:
@@ -265,14 +265,38 @@ auxiliary:
     provider: typesafe-jev
     model: ~typesafe/jev-latest
     base_url: https://openrouter.ai/api/alpha
-    key_env: OPENROUTER_API_KEY
 ```
+
+Run `hermes auth add openrouter` once and that is the whole configuration — the plugin finds
+the key in Hermes' own `openrouter` credential pool.
+
+> **Do not put `api_key` or `key_env` under `auxiliary.approval`.** A key set beside
+> `base_url` in task config makes core resolve the provider as `custom`
+> (`auxiliary_client.py`, `if cfg_base_url and cfg_api_key`), which builds a generic OpenAI
+> client and **bypasses this plugin entirely** — OpenRouter then rejects the call, because a
+> decisions model cannot be used on `/chat/completions`. `key_env` is the nastier of the two:
+> it only resolves when that variable is actually exported, so the same config works on one
+> machine and silently bypasses the plugin on another. `tests/test_real_load.py` asserts all
+> three shapes so this README cannot drift from the behaviour.
+
+If the aggregator's key is *not* in a Hermes credential pool, name its env var in the
+plugin's own settings instead:
+
+```yaml
+plugins:
+  entries:
+    jev-approvals:
+      settings:
+        key_env: SOME_AGGREGATOR_KEY   # optional; aggregator routes only
+```
+
+Resolution order for an aggregator host: its Hermes credential pool → `settings.key_env` →
+the aggregator's default variable (`OPENROUTER_API_KEY`). The TypeSafe direct route ignores
+this setting completely and uses `TYPESAFE_API_KEY`.
 
 Core passes `api_key` and `base_url` through to the plugin's `create_client`
 (`auxiliary_client.py:5128`) and leaves both URLs untouched, so the endpoint is derived from
-the host: `openrouter.ai` -> `/decisions`, anything else -> `/systemone`. The OpenRouter key is
-picked up from Hermes' `openrouter` credential pool automatically, so one key already in
-Hermes serves both.
+the host: `openrouter.ai` -> `/decisions`, anything else -> `/systemone`.
 
 Verified live on the same 5 commands, **identical verdicts on both routes**:
 

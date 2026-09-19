@@ -72,6 +72,11 @@ SENTINEL_ENV = "TYPESAFE_API_KEY"
 # /v1/models list — `?output_modalities=decisions` is the filter that finds them
 # (`?providers=TypeSafe` is accepted but matches nothing).
 _OPENROUTER_HOST = "openrouter.ai"
+# host -> (hermes provider whose credential pool holds the key, default key env var).
+# Only aggregators that front Jev; the TypeSafe host is not here (it uses TYPESAFE_API_KEY).
+# `settings.key_env` overrides the env var name, so a future aggregator that Hermes has no
+# provider entry for still works from config alone.
+_AGGREGATORS = {_OPENROUTER_HOST: ("openrouter", "OPENROUTER_API_KEY")}
 _ROUTES = {
     _OPENROUTER_HOST: ("/decisions",
                        "https://openrouter.ai/api/v1/models?output_modalities=decisions",
@@ -180,6 +185,33 @@ _COMMAND_RE = re.compile(r"<command>\s*(.*?)\s*</command>", re.S)
 _FLAGGED_RE = re.compile(r"flagged as:\s*(.+?)(?:\n|$)")
 
 
+PLUGIN_ID = "jev-approvals"
+
+
+def _setting(key: str, default: Any = None) -> Any:
+    """Read `plugins.entries.jev-approvals.settings.<key>` from the host config.
+
+    ponytail: same path and precedence as `PluginContext.get_config`, read directly. That
+    facade is not unavailable in principle — it is a method on an object built from a
+    manifest plus the plugin manager, and constructing one works fine AFTER discovery. It
+    is unavailable to US: `kind: model-provider` gets no `register(ctx)`, and at our import
+    time (providers/ discovery, inside hermes_cli.auth's own module body) the manager has
+    discovered zero plugins, so there is no manifest to build a ctx from. Reaching it would
+    mean fabricating a PluginManifest and touching two private modules on an import path
+    that must never raise. Six lines and one public import is the smaller cost.
+
+    Read on every call so an edit applies without a restart. Never raises.
+    """
+    try:
+        from hermes_cli.config import load_config_readonly
+        entry = ((load_config_readonly() or {}).get("plugins") or {}).get("entries") or {}
+        settings = (entry.get(PLUGIN_ID) or {}).get("settings") or {}
+        value = settings.get(key)
+        return default if value in (None, "") else value
+    except Exception:
+        return default
+
+
 def _route_for(base_url: str) -> Tuple[str, str, str]:
     """(decision endpoint, models URL, models JSON key) for a base_url's host.
 
@@ -201,21 +233,29 @@ def _api_key(base_url: str = "") -> str:
     os.environ ignores it — the plugin appeared to require a manual `export`, which was a
     bug, not a design.
 
-    On the OpenRouter route the key belongs to `openrouter`, so resolve that pool entry
-    first: one key already in Hermes serves both, and no plugin-specific config is needed.
+    A non-TypeSafe host means an aggregator is fronting Jev, and its key is NOT the TypeSafe
+    one. The key can never come from `auxiliary.approval.api_key`/`key_env`: a key set
+    beside `base_url` in task config collapses the provider to "custom"
+    (auxiliary_client.py, `if cfg_base_url and cfg_api_key`) and this plugin is bypassed.
+    So the aggregator's credential is resolved here instead — from its own Hermes pool
+    entry, then from `settings.key_env`, then from that variable in the environment.
     """
     host = (urllib.parse.urlparse(base_url or "").hostname or "").lower()
-    if host.endswith(_OPENROUTER_HOST):
-        for name in ("openrouter",):
-            key = _key_from_runtime_provider(name)
-            if key:
-                return key
-        key = (os.environ.get("OPENROUTER_API_KEY") or "").strip()
+    aggregator = _aggregator_for(host)
+    if aggregator:
+        provider, default_env = aggregator
+        key = _key_from_runtime_provider(provider)
+        if key:
+            return key
+        env_var = str(_setting("key_env", default_env) or "").strip()
+        key = (os.environ.get(env_var) or "").strip() if env_var else ""
         if key:
             return key
         raise RuntimeError(
-            "No OpenRouter credential found for the OpenRouter Jev route. Run "
-            "`hermes auth add openrouter` (or set OPENROUTER_API_KEY in ~/.hermes/.env).")
+            f"No {provider} credential found for the {host} Jev route. Run "
+            f"`hermes auth add {provider}`, or set {env_var or '<key env var>'} in "
+            f"~/.hermes/.env, or name the variable in "
+            f"`plugins.entries.{PLUGIN_ID}.settings.key_env`.")
     for resolve in (lambda: _key_from_runtime_provider(PROVIDER_NAME), _key_from_dotenv):
         try:
             key = resolve()
@@ -229,6 +269,20 @@ def _api_key(base_url: str = "") -> str:
     raise RuntimeError(
         f"No TypeSafe credential found. Run `hermes auth add {PROVIDER_NAME}` "
         f"(or set {SENTINEL_ENV} in ~/.hermes/.env).")
+
+
+def _aggregator_for(host: str) -> Optional[Tuple[str, str]]:
+    """(hermes provider name, default key env var) when `host` is a known aggregator.
+
+    ponytail: one table entry per aggregator that fronts Jev. Today only OpenRouter ships
+    a decisions endpoint; when another appears, add its host here and the credential path
+    already works. `settings.key_env` overrides the default variable name without a code
+    change, which is the part an unknown future aggregator actually needs.
+    """
+    for known, entry in _AGGREGATORS.items():
+        if host.endswith(known):
+            return entry
+    return None
 
 
 def _key_from_runtime_provider(requested: str) -> str:
