@@ -1,8 +1,10 @@
 name: jev-approval-provider
 version: "0.1.0"
 kind: model-provider
-description: "PROOF OF CONCEPT — APPROVALS ONLY. Registers TypeSafe's Jev decision model as a Hermes provider for the single purpose of serving `auxiliary.approval` when `approvals.mode: smart`. Jev returns typed probabilities instead of text, which is the native shape of the guardian's APPROVE/DENY/ESCALATE question; measured on 153 real commands from this machine's own history it was 8.7x faster than the aux chat model with 4.4x fewer human prompts. It CANNOT generate text, so it refuses any prompt that is not the smart-approval guardian's — never set it as a chat provider or for any other auxiliary task."
+description: "PROOF OF CONCEPT — APPROVALS ONLY. Registers TypeSafe's Jev decision model as a Hermes provider for the single purpose of serving `auxiliary.approval` when `approvals.mode: smart`. Jev returns typed probabilities instead of text, which is the native shape of the guardian's APPROVE/DENY/ESCALATE question; measured on 156 real commands from this machine's own history it was 9.8x faster than the aux chat model with 4.2x fewer human prompts. It also registers one `pre_tool_call` hook that blocks credential exfiltration (curl -d @, scp, rsync, nc of key/token files to an unrelated host) — a class Hermes' own command detectors do not flag at all, so nothing else reviews it; measured 10/10 blocked with 0/9 false positives on routine deploys, and it fails open on any API error. The provider CANNOT generate text, so it refuses any prompt that is not the smart-approval guardian's — never set it as a chat provider or for any other auxiliary task."
 author: "anpicasso"
+provides_hooks:
+  - pre_tool_call
 requires_env:
   - TYPESAFE_API_KEY
 python_dependencies: []

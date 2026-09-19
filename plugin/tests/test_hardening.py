@@ -197,4 +197,32 @@ assert rows[3]["truncated"] is True
 assert "A" * 9000 not in json.dumps(rows[3]), "record stored the full untruncated command"
 print("4. every decision recorded with its reason; truncated never APPROVEd  ok")
 
-print(f"\nall 4 hardening checks pass (record: {_LOG})")
+# --- 5. the log is size-capped, not unbounded ----------------------------------------
+# Real sizes, real rotation: shrink the cap and drive enough decisions to cross it.
+jev._LOG_MAX_BYTES = 3000
+rotated = _LOG.with_suffix(_LOG.suffix + ".1")
+rotated.unlink(missing_ok=True)
+_LOG.unlink(missing_ok=True)
+for _ in range(12):
+    verdict_for("git commit -m x", description="git operation")
+assert rotated.exists(), "log never rotated: it would grow without bound"
+assert _LOG.stat().st_size < jev._LOG_MAX_BYTES, _LOG.stat().st_size
+assert rotated.stat().st_size >= jev._LOG_MAX_BYTES, rotated.stat().st_size
+# both generations stay valid JSONL, so a re-score pass can read them
+for path in (_LOG, rotated):
+    for line in path.read_text().splitlines():
+        json.loads(line)
+# exactly two files, ever: a second rotation overwrites .1 rather than piling up .2/.3
+before = sorted(p.name for p in _LOG.parent.iterdir())
+for _ in range(12):
+    verdict_for("git commit -m x", description="git operation")
+assert sorted(p.name for p in _LOG.parent.iterdir()) == before, "rotation generations pile up"
+
+# and it can be turned off entirely
+jev._LOG_MAX_BYTES = 0
+_LOG.unlink(missing_ok=True)
+verdict_for("ls -la")
+assert not _LOG.exists(), "JEV_APPROVAL_LOG_MAX_BYTES=0 did not disable the log"
+print("5. decision log rotates at a cap and stays two files                   ok")
+
+print(f"\nall 5 hardening checks pass")
