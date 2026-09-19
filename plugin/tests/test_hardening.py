@@ -144,7 +144,7 @@ _real_load = _json.load
 _json.load = lambda fp: _json.loads(fp.read())
 jev.random.random = lambda: 0.0
 jev.time.sleep = lambda s: None
-jev._api_key = lambda: "test-key"
+jev._api_key = lambda base_url="": "test-key"
 
 for codes, label in ([429], "429"), ([503], "503"), (["net"], "network error"):
     opener, state = failing_urlopen(codes)

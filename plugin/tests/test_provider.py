@@ -2,7 +2,7 @@
 """Prove the provider is really discovered and really serves the approval prompt.
 
 `plugins doctor` only validates the manifest and import. Three things it does NOT prove:
-  1. get_provider_profile("jev-approval") returns the profile (real discovery)
+  1. get_provider_profile("typesafe-jev") returns the profile (real discovery)
   2. the client answers the actual guardian prompt core builds
   3. it REFUSES anything else instead of fabricating text
 
@@ -21,15 +21,12 @@ sys.path.insert(0, str(HERMES_SRC))
 
 import importlib.util, pathlib
 _PLUGIN_DIR = pathlib.Path(__file__).resolve().parent.parent
-spec = importlib.util.spec_from_file_location("jev_approval_provider", _PLUGIN_DIR / "__init__.py")
+spec = importlib.util.spec_from_file_location("typesafe_jev", _PLUGIN_DIR / "__init__.py")
 assert spec and spec.loader
 plug = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(plug)
-# The provider registers from register(ctx), NOT at import: `kind: model-provider` never
-# gets a register(ctx) call from the real manager, which would silently drop the plugin's
-# pre_tool_call hook. See tests/test_real_load.py. Importing alone therefore registers
-# nothing, so call the same entry point the host calls.
-plug._register_provider_once()
+# Registration happens at IMPORT (kind: model-provider), which is also what puts the name
+# into hermes_cli.auth.PROVIDER_REGISTRY. See tests/test_real_load.py.
 
 from providers import get_provider_profile
 
@@ -89,11 +86,11 @@ CASES = [
 ]
 
 if __name__ == "__main__":
-    profile = get_provider_profile("jev-approval")
-    print(f"discovery: get_provider_profile('jev-approval') -> "
+    profile = get_provider_profile("typesafe-jev")
+    print(f"discovery: get_provider_profile('typesafe-jev') -> "
           f"{type(profile).__name__ if profile else None}")
     assert profile is not None, "provider not discovered"
-    assert profile.name == "jev-approval"
+    assert profile.name == "typesafe-jev"
     print(f"  aliases {profile.aliases}, auth_type {profile.auth_type}, "
           f"models {tuple(profile.fallback_models)}")
 

