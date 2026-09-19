@@ -121,6 +121,33 @@ try:
 finally:
     _aux._get_auxiliary_task_config = _real_task_cfg
 
+# 3c. THE PICKER PATH. `hermes model` -> Configure auxiliary models -> Approval reads the
+# profile through build_aux_picker_rows, and core calls
+# `fetch_models(api_key=..., base_url=...)` (hermes_cli/models.py::_profile_live_catalog).
+# A bare `fetch_models(self)` raises TypeError there: the row shows 0 models and the flow
+# drops to a free-text prompt, with nothing in the log. Assert the signature and the row.
+from hermes_cli.models import provider_model_ids  # noqa: E402
+
+live = profile.fetch_models(api_key="", base_url="")          # core's exact call shape
+assert live, "fetch_models returned nothing for the default route"
+assert profile.fetch_models(api_key="", base_url="", future_kwarg=1), "must absorb new kwargs"
+ids = provider_model_ids(PROVIDER)
+assert ids, f"provider_model_ids({PROVIDER!r}) is empty — the picker would show no models"
+print(f"picker: provider_model_ids -> {ids}")
+
+from hermes_cli.inventory import build_aux_picker_rows  # noqa: E402
+
+rows = build_aux_picker_rows(current_provider="auto", current_model="", current_base_url="")
+ours = [r for r in rows if str(r.get("slug", "")) == PROVIDER]
+assert ours, f"{PROVIDER} is absent from the auxiliary picker rows"
+assert ours[0].get("models"), f"{PROVIDER} appears in the picker with an EMPTY model list"
+print(f"aux picker row: {ours[0]['name']!r} models={ours[0]['models']}")
+
+# `approval` must still be one of the offered aux tasks, or the menu path does not exist
+from hermes_cli.main_provider_setup import _all_aux_tasks  # noqa: E402
+
+assert any(k == "approval" for k, _n, _d in _all_aux_tasks()), "no 'approval' aux task in the menu"
+
 # 4. the host -> endpoint mapping, including that an unknown host is not the alpha route
 import importlib.util  # noqa: E402
 import pathlib  # noqa: E402

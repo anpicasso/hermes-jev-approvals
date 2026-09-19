@@ -25,7 +25,9 @@ full reasoning model spun up to emit one token, which a regex then parses back o
 
 Jev answers that shape natively — one typed `Choice`, calibrated probability, nothing to
 parse. This plugin registers it as a Hermes provider so that one task can use it, over either
-of two routes — TypeSafe direct or OpenRouter ([below](#or-route-through-openrouter)).
+of two routes: **TypeSafe direct** ([setup](#configure-typesafe-default), two menu clicks) or
+**OpenRouter** ([setup](#configure-openrouter-optional-needs-config-by-hand), same model, same
+price, config file only).
 
 ```yaml
 auxiliary:
@@ -225,116 +227,137 @@ as an upstream issue instead.
 
 ```bash
 hermes plugins install anpicasso/hermes-jev-approvals/plugin
+hermes auth add typesafe-jev     # paste your TypeSafe key when prompted
+```
 
-hermes auth add typesafe-jev        # paste your TypeSafe key when prompted
+Restart the gateway (`systemctl --user restart hermes-gateway`) — there is no hot reload for
+Python plugins. No `plugins enable` needed: `kind: model-provider` is discovered
+independently of `plugins.enabled`.
+
+## Configure — TypeSafe (default)
+
+Everything from the menu, no file editing:
+
+```
+hermes model
+  -> Configure auxiliary models...
+     -> Approval
+        -> TypeSafe Jev (smart approvals only)
+           -> jev-latest
+```
+
+That writes `auxiliary.approval.provider` and `.model` for you. The model list in that picker
+is fetched live from TypeSafe, so new Jev versions appear without a plugin update.
+
+Or the same thing as two commands:
+
+```bash
 hermes config set auxiliary.approval.provider typesafe-jev
 hermes config set auxiliary.approval.model jev-latest
 ```
 
-Then restart the gateway (`systemctl --user restart hermes-gateway`) — there is no hot reload
-for Python plugins.
+Also make sure smart approvals are on, or the reviewer is never consulted:
 
-**Plugin `jev-approvals`, provider `typesafe-jev`.** Those are deliberately different and
-independent: the plugin is named for what it does, the provider for the model you select in
-`auxiliary.approval.provider`. Discovery only checks `kind: model-provider` and imports the
-directory; the `ProviderProfile` decides the provider name.
+```bash
+hermes config set approvals.mode smart
+```
 
-No `plugins enable` needed: `kind: model-provider` is discovered independently of
-`plugins.enabled`. That kind is also **required**, and for a non-obvious reason —
-`hermes_cli.auth.PROVIDER_REGISTRY` is built at import time by walking `list_providers()`, and
-`model-provider` is the only kind `providers/` imports during that walk. A provider that
-registers later (e.g. from `register(ctx)` under `kind: standalone`) is absent from that
-registry, and `resolve_provider_client` then rejects the name as *"unknown provider"* while
-`plugins doctor` still reports everything green. `tests/test_real_load.py` asserts membership
-in **both** registries and fails if the kind is changed.
+That is the whole setup. Credentials resolve through Hermes' own chain —
+`resolve_runtime_provider` (pool-aware), then `~/.hermes/.env`, then the environment — so no
+shell `export` is needed. A bare `TYPESAFE_API_KEY` still works if you prefer it.
 
-No shell export needed. The plugin declares `auth_type: api_key` with a non-empty `env_vars`,
-so `hermes_cli/auth.py::_register_plugin_provider` registers it and `hermes auth add
-typesafe-jev` works like any first-party provider. The client resolves the credential through
-Hermes' own chain — `resolve_runtime_provider` (pool-aware), then `~/.hermes/.env`, then the
-process environment.
+## Configure — OpenRouter (optional, needs config by hand)
 
-### Or route through OpenRouter
+OpenRouter hosts the same model at the same published price on its own decisions endpoint,
+and returns the identical typed answers. It is **not** available from the `hermes model` menu:
+that picker prompts for a model and reasoning effort only, and its "Custom endpoint" option
+hardcodes `provider: custom`, which bypasses this plugin. So this route is config-file only.
 
-OpenRouter hosts the same model at the same published price, on its own decisions endpoint.
-Same provider, different `base_url`:
+**1. Store the key once** (skip if you already use OpenRouter in Hermes):
+
+```bash
+hermes auth add openrouter
+```
+
+**2. Point the task at OpenRouter** — in `config.yaml`:
 
 ```yaml
 auxiliary:
   approval:
     provider: typesafe-jev
-    model: ~typesafe/jev-latest
+    model: ~typesafe/jev-latest          # note the ~typesafe/ prefix
     base_url: https://openrouter.ai/api/alpha
 ```
 
-Run `hermes auth add openrouter` once and that is the whole configuration — the plugin finds
-the key in Hermes' own `openrouter` credential pool.
+> ### Do NOT add `api_key` or `key_env` here
+>
+> This is the one real trap. A key set beside `base_url` in task config makes core resolve the
+> provider as `custom` (`auxiliary_client.py`, `if cfg_base_url and cfg_api_key`), which builds
+> a generic OpenAI client and **bypasses this plugin entirely** — OpenRouter then rejects the
+> call, because a decisions model cannot be used on `/chat/completions`.
+>
+> `key_env` is the nastier of the two: it only collapses when that variable is actually
+> exported, so the same config works on one machine and silently bypasses the plugin on
+> another. Leave both out. The plugin finds the key itself.
+>
+> `tests/test_real_load.py` asserts all three config shapes, so this cannot drift.
 
-> **Do not put `api_key` or `key_env` under `auxiliary.approval`.** A key set beside
-> `base_url` in task config makes core resolve the provider as `custom`
-> (`auxiliary_client.py`, `if cfg_base_url and cfg_api_key`), which builds a generic OpenAI
-> client and **bypasses this plugin entirely** — OpenRouter then rejects the call, because a
-> decisions model cannot be used on `/chat/completions`. `key_env` is the nastier of the two:
-> it only resolves when that variable is actually exported, so the same config works on one
-> machine and silently bypasses the plugin on another. `tests/test_real_load.py` asserts all
-> three shapes so this README cannot drift from the behaviour.
+That is all. The plugin reads the OpenRouter key from Hermes' `openrouter` credential pool,
+and picks the endpoint from the host: `openrouter.ai` -> `/decisions`, anything else ->
+`/systemone`.
 
-If the aggregator's key is *not* in a Hermes credential pool, name its env var in the
-plugin's own settings instead:
+**Only if the key is not in a Hermes credential pool**, name its variable in the plugin's own
+settings:
 
 ```yaml
 plugins:
   entries:
     jev-approvals:
       settings:
-        key_env: SOME_AGGREGATOR_KEY   # optional; aggregator routes only
+        key_env: SOME_AGGREGATOR_KEY     # optional; aggregator routes only
 ```
 
-Resolution order for an aggregator host: its Hermes credential pool → `settings.key_env` →
-the aggregator's default variable (`OPENROUTER_API_KEY`). The TypeSafe direct route ignores
-this setting completely and uses `TYPESAFE_API_KEY`.
+Resolution order for an aggregator host: its Hermes credential pool -> `settings.key_env` ->
+the aggregator's default variable (`OPENROUTER_API_KEY`). The TypeSafe route ignores this
+setting entirely.
 
-Core passes `api_key` and `base_url` through to the plugin's `create_client`
-(`auxiliary_client.py:5128`) and leaves both URLs untouched, so the endpoint is derived from
-the host: `openrouter.ai` -> `/decisions`, anything else -> `/systemone`.
+### Which route to pick
 
-Verified live on the same 5 commands, **identical verdicts on both routes**:
+Verified live on the same 5 commands, **identical verdicts on both**:
 
-| route | endpoint | resolved model | avg |
-|---|---|---|---|
-| TypeSafe direct | `/systemone` | `jev-1.13.0` | 339 ms |
-| OpenRouter | `/decisions` | `typesafe/jev-1.13-20260917` | 218 ms |
+| | endpoint | resolved model | avg | extras |
+|---|---|---|---|---|
+| TypeSafe direct | `/systemone` | `jev-1.13.0` | 339 ms | menu-configurable, `jev-preview` |
+| OpenRouter | `/decisions` | `typesafe/jev-1.13-20260917` | 218 ms | per-call `cost`, pinnable version |
 
-Two things OpenRouter gives you that TypeSafe direct does not: a `cost` field per response,
-and a **pinnable version** (`typesafe/jev-1.13`) — TypeSafe direct only offers the moving
-`jev-latest` / `jev-preview`, so the OpenRouter route is the better one for any number you
-intend to quote. Caveat: its path is `/api/alpha/`, explicitly alpha, so it can change; that
-is why TypeSafe direct stays the default.
+OpenRouter is faster here and lets you pin an exact version (`typesafe/jev-1.13`), which
+matters for any number you intend to quote — TypeSafe direct only offers the moving
+`jev-latest` / `jev-preview`. Against that, its path is `/api/alpha/`, explicitly alpha, so it
+can change under you. That is why TypeSafe direct is the default.
 
-Model lists are fetched live on both routes, not hardcoded:
+Model lists come from the upstream on both routes, never a hardcoded list:
 
 ```
 TypeSafe    GET /v1/models                              -> jev-latest, jev-preview
 OpenRouter  GET /v1/models?output_modalities=decisions   -> ~typesafe/jev-latest, typesafe/jev-1.13
 ```
 
-The OpenRouter filter matters: decision models are absent from the unfiltered list, and
-`?providers=TypeSafe` is accepted but matches nothing — without the right filter you pull all
-447 models to find two.
+The OpenRouter filter is load-bearing: decision models are absent from the unfiltered list and
+`?providers=TypeSafe` matches nothing, so without it you would pull all 447 models to find two.
 
-Verify:
+## Verify
 
 ```bash
 hermes plugins doctor ~/.hermes/plugins/jev-approvals --ci
 cd ~/.hermes/plugins/jev-approvals
-python3 tests/test_real_load.py    # both registries + both routes, no key needed
+python3 tests/test_real_load.py    # registries, picker rows, config shapes — no key needed
 python3 tests/test_hardening.py    # offline, no key needed
 python3 tests/test_routes.py       # live: both routes must agree
 python3 tests/test_provider.py     # live, needs a key
 ```
 
-**Plugins are profile-scoped** — `$HERMES_HOME/plugins` is per-profile, so repeat the
-install for each profile that needs it.
+**Plugins are profile-scoped** — `$HERMES_HOME/plugins` is per-profile, so repeat the install
+for each profile that needs it.
 
 To roll back, unset the config keys. Hermes falls back to its normal auxiliary routing.
 
@@ -342,7 +365,8 @@ To roll back, unset the config keys. Hermes falls back to its normal auxiliary r
 
 - Hermes Agent with plugin support and `approvals.mode: smart`
 - A TypeSafe API key ([console.typesafe.ai](https://console.typesafe.ai/settings/keys)),
-  stored via `hermes auth add typesafe-jev`
+  stored via `hermes auth add typesafe-jev` — or, for the OpenRouter route, an OpenRouter key
+  via `hermes auth add openrouter`
 - Python 3.10+, **no third-party dependencies** (stdlib `urllib`)
 
 ## Limitations

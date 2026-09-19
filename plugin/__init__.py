@@ -595,7 +595,7 @@ def _record(row: Dict[str, Any]) -> None:
         logger.debug("%s: could not write decision log: %s", PROVIDER_NAME, exc)
 
 
-def fetch_decision_models(base_url: str = "") -> List[str]:
+def fetch_decision_models(base_url: str = "", api_key: str = "") -> List[str]:
     """Live model ids for this route. Never raises — it runs during provider discovery.
 
     TypeSafe:   GET /v1/models                                   -> {"models":[{"name":...}]}
@@ -603,6 +603,9 @@ def fetch_decision_models(base_url: str = "") -> List[str]:
     The OpenRouter filter matters: decision models are absent from the unfiltered list, and
     `?providers=TypeSafe` is accepted but matches nothing. Without it we would pull all 447
     models to find two.
+
+    `api_key` is the caller's credential when it has one (the model picker passes the one it
+    resolved); otherwise the route's own resolution runs.
     """
     _, models_url, key = _route_for(base_url)
     field = "id" if key == "data" else "name"
@@ -610,7 +613,8 @@ def fetch_decision_models(base_url: str = "") -> List[str]:
         req = urllib.request.Request(models_url)
         # TypeSafe's /v1/models needs auth; OpenRouter's public list does not.
         if key != "data":
-            req.add_header("Authorization", f"Bearer {_api_key(base_url)}")
+            req.add_header("Authorization",
+                           f"Bearer {str(api_key).strip() or _api_key(base_url)}")
         with urllib.request.urlopen(req, timeout=10) as resp:
             payload = json.load(resp)
         ids = [str(m.get(field) or "") for m in (payload.get(key) or []) if isinstance(m, dict)]
@@ -628,11 +632,20 @@ def _build_profile():
         def create_client(self, **client_kwargs: Any) -> Any:
             return JevClient(**client_kwargs)
 
-        def fetch_models(self) -> Optional[List[str]]:
-            # Live list from whichever route is configured; the static seed is only the
-            # offline fallback. Never raises: this runs during provider discovery,
-            # including in the web server process.
-            return fetch_decision_models() or list(self.fallback_models)
+        def fetch_models(self, api_key: str = "", base_url: str = "",
+                         **_: Any) -> Optional[List[str]]:
+            """Live catalog for the configured route.
+
+            The kwargs are core's contract, not decoration: the model picker calls
+            `profile.fetch_models(api_key=..., base_url=...)`
+            (hermes_cli/models.py::_profile_live_catalog), so a bare `fetch_models(self)`
+            raises TypeError there and the provider lists nothing. `base_url` is what
+            selects the route, so `hermes models` shows the OpenRouter ids when the aux
+            task points at OpenRouter and the TypeSafe ids otherwise. **_ absorbs future
+            kwargs rather than breaking again.
+            """
+            return (fetch_decision_models(base_url, api_key=api_key)
+                    or list(self.fallback_models))
 
     return TypeSafeJevProfile(
         name=PROVIDER_NAME,
