@@ -493,12 +493,30 @@ def _build_profile():
     )
 
 
-try:
-    from providers import register_provider
-    register_provider(_build_profile())
-    logger.info("jev-approval provider registered")
-except Exception as exc:  # pragma: no cover - discovery must never break startup
-    logger.warning("jev-approval provider registration failed: %s", exc)
+def _register_provider_once() -> None:
+    """Register the ProviderProfile, at most once per process.
+
+    ponytail: called from register(ctx), NOT at import. `kind: model-provider` would make
+    providers/ import this file for its side effect — but that kind is PLACEHOLDERED by the
+    plugin manager (hermes_cli/plugins_discovery.py::gate_manifest: "Skipping '%s'
+    (model-provider, handled by providers/ discovery)"), so register(ctx) is never called
+    and the pre_tool_call hook below would be dead code in a real gateway. `plugins doctor`
+    calls register(ctx) explicitly, which hides this. So: kind is `standalone`, and the
+    provider registers itself here, next to the hook.
+    """
+    global _PROVIDER_REGISTERED
+    if _PROVIDER_REGISTERED:
+        return
+    try:
+        from providers import register_provider
+        register_provider(_build_profile())
+        _PROVIDER_REGISTERED = True
+        logger.info("jev-approval provider registered")
+    except Exception as exc:  # pragma: no cover - must never break plugin loading
+        logger.warning("jev-approval provider registration failed: %s", exc)
+
+
+_PROVIDER_REGISTERED = False
 
 
 # --------------------------------------------------------------------------------------
@@ -674,8 +692,12 @@ def _pre_tool_call(tool_name: str = "", args: Optional[Dict[str, Any]] = None,
 
 
 def register(ctx) -> None:
-    """Register the exfiltration hook. The PROVIDER registers at import (above); this adds
-    the one thing a provider cannot do — see unflagged commands."""
+    """Both halves: the approval provider, and the exfiltration hook a provider cannot do.
+
+    Needs `kind: standalone` in plugin.yaml (see _register_provider_once) and therefore
+    `hermes plugins enable jev-approval-provider`.
+    """
+    _register_provider_once()
     try:
         ctx.register_hook("pre_tool_call", _pre_tool_call)
         logger.info("jev-approval: exfiltration pre_tool_call hook registered")

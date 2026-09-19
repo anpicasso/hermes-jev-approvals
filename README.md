@@ -261,13 +261,25 @@ happens to contain secrets reads as a backup. Widening that trades directly agai
 ## Install
 
 ```bash
-hermes plugins install anpicasso/hermes-jev-approvals/plugin --no-enable
+hermes plugins install anpicasso/hermes-jev-approvals/plugin
+hermes plugins enable jev-approval-provider   # required: see note below
 
 hermes auth add jev-approval        # paste your TypeSafe key when prompted
 hermes config set auxiliary.approval.provider jev-approval
 hermes config set auxiliary.approval.model jev-latest
 hermes gateway restart              # no hot reload for Python plugins
 ```
+
+**Why `plugins enable` is needed here**, when a model-provider plugin normally is not: this
+plugin is `kind: standalone` on purpose. A `kind: model-provider` manifest is *placeholdered*
+by the plugin manager — `providers/` imports the module for its self-registration side effect
+and `register(ctx)` is **never called** — so the `pre_tool_call` hook would be silently dead
+code in a real gateway. `plugins doctor` calls `register(ctx)` itself and reports the hook as
+present either way, which hides it completely. So the provider self-registers from inside
+`register(ctx)`, next to the hook, and both halves ride the standalone load path.
+
+`tests/test_real_load.py` asserts this through the real plugin manager and fails if the kind
+is ever changed back. Flipping it to `model-provider` reports `pre_tool_call hooks: []`.
 
 No shell export needed. The plugin declares `auth_type: api_key` with a non-empty
 `env_vars`, so `hermes_cli/auth.py::_register_plugin_provider` auto-registers it into
@@ -277,11 +289,12 @@ The client resolves the credential through Hermes' own chain — `resolve_runtim
 CLI is found without touching your shell. A bare `TYPESAFE_API_KEY` export still works if
 you prefer it.
 
-Model-provider plugins register at import, so no `plugins enable` is needed. Verify:
+Verify:
 
 ```bash
 hermes plugins doctor ~/.hermes/plugins/jev-approval-provider --ci
 cd ~/.hermes/plugins/jev-approval-provider
+python3 tests/test_real_load.py    # both halves load via the REAL plugin manager
 python3 tests/test_hardening.py    # offline, no key needed
 python3 tests/test_exfil_hook.py   # offline checks, then live if a key is set
 python3 tests/test_provider.py     # live, needs a key

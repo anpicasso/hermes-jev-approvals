@@ -19,13 +19,17 @@ HERMES_SRC = pathlib.Path(os.environ.get("HERMES_SRC") or (HERMES_HOME / "hermes
 
 sys.path.insert(0, str(HERMES_SRC))
 
-# Import the plugin the way discovery does (module-level register_provider).
 import importlib.util, pathlib
 _PLUGIN_DIR = pathlib.Path(__file__).resolve().parent.parent
 spec = importlib.util.spec_from_file_location("jev_approval_provider", _PLUGIN_DIR / "__init__.py")
 assert spec and spec.loader
 plug = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(plug)
+# The provider registers from register(ctx), NOT at import: `kind: model-provider` never
+# gets a register(ctx) call from the real manager, which would silently drop the plugin's
+# pre_tool_call hook. See tests/test_real_load.py. Importing alone therefore registers
+# nothing, so call the same entry point the host calls.
+plug._register_provider_once()
 
 from providers import get_provider_profile
 
