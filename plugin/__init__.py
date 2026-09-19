@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import re
 import sys
 import time
@@ -42,6 +43,24 @@ logger = logging.getLogger(__name__)
 DEFAULT_BASE_URL = "https://api.typesafe.ai/v1"
 ENDPOINT = "/systemone"
 SENTINEL_ENV = "TYPESAFE_API_KEY"
+
+# The command text leaves this machine. Cap it so a heredoc or a generated pipeline cannot
+# produce an unbounded request body on exactly the long commands where judgement matters,
+# and mark the cut so the model sees truncation rather than inferring a complete command.
+MAX_COMMAND_CHARS = 4000
+_ELIDED = "\u2026[{n} chars elided]"
+
+# Transient failures only. A 4xx will not improve on a retry, and core escalates to a human
+# on any exception from this provider — so one dropped connection costs an interruption and
+# is indistinguishable in the log from a real escalation.
+_RETRY_STATUS = {429, 529}
+_MAX_ATTEMPTS = 3
+_DEADLINE_S = 25.0
+
+# Per-decision record. Thresholds here were picked as round numbers; nothing can re-derive
+# them without the distribution of what real traffic actually scores.
+_LOG_PATH = Path(os.environ.get("JEV_APPROVAL_LOG")
+                 or Path.home() / ".hermes" / "jev-approval-decisions.jsonl")
 
 # The guardian's three verdicts, as Jev Choice options. Criteria are lifted from the
 # semantics tools/approval_smart.py's system prompt asks for, so behaviour matches what
@@ -158,12 +177,104 @@ def _key_from_dotenv() -> str:
 
 
 def _post(base_url: str, body: Dict[str, Any], timeout: float) -> Dict[str, Any]:
+    """POST with bounded retries on transient failures only.
+
+    ponytail: stdlib urllib + a loop, no new dependency. Retries 429/529/5xx and network
+    errors under one overall deadline — not `_MAX_ATTEMPTS * timeout`, because this call
+    blocks the agent's turn while a human waits.
+    """
     url = (base_url or DEFAULT_BASE_URL).rstrip("/") + ENDPOINT
-    req = urllib.request.Request(
-        url, data=json.dumps(body).encode(),
-        headers={"Authorization": f"Bearer {_api_key()}", "Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.load(resp)
+    data = json.dumps(body).encode()
+    key = _api_key()
+    deadline = time.monotonic() + min(_DEADLINE_S, max(timeout, 5.0))
+    last: Exception = RuntimeError("jev-approval: no attempt made")
+
+    for attempt in range(1, _MAX_ATTEMPTS + 1):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        req = urllib.request.Request(
+            url, data=data,
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=min(timeout, remaining)) as resp:
+                return json.load(resp)
+        except urllib.error.HTTPError as exc:
+            retryable = exc.code in _RETRY_STATUS or exc.code >= 500
+            last = RuntimeError(f"jev-approval: HTTP {exc.code} {_http_hint(exc.code)}")
+            if not retryable:
+                raise last from exc
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            last = RuntimeError(f"jev-approval: {type(exc).__name__}: {exc}")
+        if attempt < _MAX_ATTEMPTS:
+            # Capped exponential backoff + jitter: several judgements can be in flight.
+            delay = min(0.5 * 2 ** (attempt - 1), 4.0) + random.random() * 0.25
+            if time.monotonic() + delay >= deadline:
+                break
+            time.sleep(delay)
+    raise last
+
+
+def _http_hint(code: int) -> str:
+    return {401: "(missing or invalid API key)", 403: "(key not permitted)",
+            422: "(request body failed validation)", 429: "(rate limited)",
+            529: "(overloaded)"}.get(code, "")
+
+
+# Credential-bearing CLI flags. Core's redactor covers env assignments, JSON, Bearer
+# headers and known token prefixes, but NOT `--password=hunter2` — a shell-command shape
+# core's own redactor never had to handle and this provider sends on every request.
+_FLAG_RE = re.compile(
+    r"(?i)(--?(?:password|passwd|pass|token|api[-_]?key|secret|access[-_]?key|"
+    r"auth[-_]?token|client[-_]?secret)[=\s]+)(\S+)")
+
+
+def _redact(text: str) -> str:
+    """Scrub credentials before the command leaves the machine.
+
+    ponytail: reuse core's redactor — it covers more shapes than anything written here
+    would, and `force=True` ignores `security.redact_secrets: false` because this is a
+    third-party egress boundary, not a display surface. Two additions on top: the CLI-flag
+    pass core lacks, and a local fallback for when core is not importable (a bench harness
+    importing this file alone).
+    """
+    try:
+        from agent.redact import redact_sensitive_text
+        out = redact_sensitive_text(text, force=True)
+    except Exception:
+        out = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._\-]{8,}", r"\1[REDACTED]", text)
+        out = re.sub(r"(?i)\b((?:api[_-]?key|secret|token|password|passwd|access[_-]?key)"
+                     r"\s*[:=]\s*)\S+", r"\1[REDACTED]", out)
+        out = re.sub(r"\b(gh[pousr]_|sk-|xox[baprs]-|AKIA|ASIA)[A-Za-z0-9_\-]{8,}",
+                     r"\1[REDACTED]", out)
+        out = re.sub(r"-----BEGIN[^-]*PRIVATE KEY-----.*?-----END[^-]*PRIVATE KEY-----",
+                     "[REDACTED PRIVATE KEY]", out, flags=re.S)
+    return _FLAG_RE.sub(r"\1[REDACTED]", out)
+
+
+def _truncate(text: str, limit: int = MAX_COMMAND_CHARS) -> Tuple[str, bool]:
+    """Head+tail cut with a visible marker, so a payload cannot hide behind filler."""
+    if len(text) <= limit:
+        return text, False
+    head, tail = limit * 2 // 3, limit // 3
+    return (text[:head] + _ELIDED.format(n=len(text) - head - tail) + text[-tail:]), True
+
+
+def _noul(answers: Dict[str, Any], key: str) -> float:
+    """Read one probability, treating a missing or malformed answer as a failure.
+
+    A key that was asked and not answered is not `0.0` — that silently reads as "no
+    hazard" and can contribute to an APPROVE. Raising makes core escalate to the human,
+    which is the correct outcome for an unanswered safety question.
+    """
+    value = (answers.get(key) or {}).get("noul")
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise RuntimeError(f"jev-approval: question {key!r} was asked but not answered "
+                           f"(got {value!r}); escalating rather than assuming no hazard")
+    value = float(value)
+    if not 0.0 <= value <= 1.0:
+        raise RuntimeError(f"jev-approval: question {key!r} returned {value} outside [0,1]")
+    return value
 
 
 def _extract(messages: List[Dict[str, Any]]) -> Tuple[Optional[str], str, str]:
@@ -247,9 +358,12 @@ class JevClient:
                 "(a <command>...</command> block). It cannot generate text, so it must not be "
                 "set as a chat provider or for any other auxiliary task.")
 
-        state: Dict[str, Any] = {"command": command}
+        # Redact BEFORE truncating, so a cut cannot split a secret into an unmatched
+        # fragment, and before anything is serialised toward a third party.
+        safe_command, truncated = _truncate(_redact(command))
+        state: Dict[str, Any] = {"command": safe_command}
         if description:
-            state["flagged_as"] = description
+            state["flagged_as"] = _redact(description)[:500]
         if policy:
             state["operator_policy"] = policy
 
@@ -260,13 +374,19 @@ class JevClient:
                                      "questions": QUESTIONS},
                      timeout or self._timeout)
         answers = data.get("answers", {})
-        verdict = str(answers.get("verdict", {}).get("choice") or "ESCALATE").upper()
-        confidence = float(answers.get("verdict", {}).get("confidence") or 0.0)
-        blast = float(answers.get("blast_radius", {}).get("score") or 0.0)
-        advocating = float(answers.get("self_advocating", {}).get("noul") or 0.0)
-        policy_ok = float(answers.get("policy_allows", {}).get("noul") or 0.0)
-        reads_secrets = float(answers.get("reads_secrets", {}).get("noul") or 0.0)
-        sends_outbound = float(answers.get("sends_outbound", {}).get("noul") or 0.0)
+        # verdict/confidence may default safely: an absent verdict means ESCALATE, which is
+        # the conservative direction. The hazard nouls may NOT — see _noul.
+        verdict = str((answers.get("verdict") or {}).get("choice") or "ESCALATE").upper()
+        confidence = float((answers.get("verdict") or {}).get("confidence") or 0.0)
+        blast_raw = (answers.get("blast_radius") or {}).get("score")
+        if not isinstance(blast_raw, (int, float)) or isinstance(blast_raw, bool):
+            raise RuntimeError("jev-approval: blast_radius was asked but not answered "
+                               f"(got {blast_raw!r}); escalating")
+        blast = float(blast_raw)
+        advocating = _noul(answers, "self_advocating")
+        policy_ok = _noul(answers, "policy_allows")
+        reads_secrets = _noul(answers, "reads_secrets")
+        sends_outbound = _noul(answers, "sends_outbound")
 
         # Policy, in code, above the model's raw pick. Order matters:
         #  1. a command arguing for its own approval is an injection attempt -> ESCALATE
@@ -280,26 +400,58 @@ class JevClient:
         # review; step 3 upgrades but requires an explicit operator_policy AND a
         # non-catastrophic blast radius, so `rm -rf /` cannot be policy-approved.
         if advocating >= 0.6:
-            verdict = "ESCALATE"
+            verdict, reason = "ESCALATE", f"self_advocating {advocating:.2f} >= 0.6"
         elif reads_secrets >= 0.7 and sends_outbound >= 0.7:
-            verdict = "DENY"
+            verdict, reason = "DENY", (f"reads_secrets {reads_secrets:.2f} + "
+                                       f"sends_outbound {sends_outbound:.2f} >= 0.7")
         elif reads_secrets >= 0.7:
-            verdict = "ESCALATE"
+            verdict, reason = "ESCALATE", f"reads_secrets {reads_secrets:.2f} >= 0.7"
         elif policy_ok >= 0.7 and blast < 2.0 and policy:
-            verdict = "APPROVE"
+            verdict, reason = "APPROVE", f"operator_policy allows ({policy_ok:.2f})"
         elif verdict == "APPROVE" and (confidence < 0.55 or blast >= 1.6):
-            verdict = "ESCALATE"
+            verdict, reason = "ESCALATE", (f"confidence {confidence:.2f} < 0.55"
+                                           if confidence < 0.55
+                                           else f"blast_radius {blast:.2f} >= 1.6")
+        else:
+            reason = f"model verdict (conf {confidence:.2f})"
         if verdict not in VERDICT_CRITERIA:
-            verdict = "ESCALATE"
+            verdict, reason = "ESCALATE", "verdict not one of APPROVE/DENY/ESCALATE"
+        # A command too long to send in full was judged on a cut: never auto-approve it.
+        if truncated and verdict == "APPROVE":
+            verdict, reason = "ESCALATE", "command truncated before judgement"
 
         usage = data.get("usage", {})
-        logger.info("jev-approval verdict: %s (conf %.2f, blast %.2f, advocating %.2f, "
+        logger.info("jev-approval %s [%s] (conf %.2f, blast %.2f, advocating %.2f, "
                     "policy_allows %.2f, reads_secrets %.2f, sends_outbound %.2f) for %r",
-                    verdict, confidence, blast, advocating, policy_ok, reads_secrets,
-                    sends_outbound, command[:60])
+                    verdict, reason, confidence, blast, advocating, policy_ok, reads_secrets,
+                    sends_outbound, safe_command[:60])
+        _record({"ts": time.time(), "verdict": verdict, "reason": reason,
+                 "model": data.get("model", model_id), "flagged_as": description,
+                 "command": safe_command[:600], "truncated": truncated,
+                 "confidence": confidence, "blast_radius": blast,
+                 "self_advocating": advocating, "policy_allows": policy_ok,
+                 "reads_secrets": reads_secrets, "sends_outbound": sends_outbound,
+                 "has_policy": bool(policy), "usage": usage})
         return _Completion(verdict, data.get("model", model_id),
                            int(usage.get("input_tokens") or 0),
                            int(usage.get("output_tokens") or 0))
+
+
+def _record(row: Dict[str, Any]) -> None:
+    """Append one decision as JSONL, 0600. Never raises: logging must not break a gate.
+
+    ponytail: unbounded append, no rotation. This is the instrument for re-deriving the
+    thresholds from real traffic — rotate it when the file actually gets large.
+    """
+    try:
+        _LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        existed = _LOG_PATH.exists()
+        with _LOG_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, default=str) + "\n")
+        if not existed:
+            os.chmod(_LOG_PATH, 0o600)
+    except Exception as exc:  # pragma: no cover
+        logger.debug("jev-approval: could not write decision log: %s", exc)
 
 
 def _build_profile():
