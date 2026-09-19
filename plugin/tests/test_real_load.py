@@ -31,7 +31,11 @@ except ImportError as exc:
     print(f"SKIP: Hermes core not importable ({exc}). Set HERMES_AGENT_DIR.")
     raise SystemExit(0)
 
-PLUGIN_ID = "typesafe-jev"
+# The PLUGIN id (manifest name / directory) and the PROVIDER name are independent: discovery
+# only checks `kind: model-provider` and imports the directory, and the profile decides the
+# provider name. So the plugin stays `jev-approvals` (what it does) while the provider is
+# `typesafe-jev` (what you type in auxiliary.approval.provider).
+PLUGIN_ID = "jev-approvals"
 PROVIDER = "typesafe-jev"
 ALIASES = ("jev",)
 

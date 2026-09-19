@@ -1,4 +1,4 @@
-name: typesafe-jev
+name: jev-approvals
 version: "0.2.0"
 # model-provider is required: it is the only kind providers/ discovery imports, and that
 # import is what registers the profile into PROVIDER_REGISTRY (built at hermes_cli.auth

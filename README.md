@@ -234,6 +234,11 @@ hermes config set auxiliary.approval.model jev-latest
 Then restart the gateway (`systemctl --user restart hermes-gateway`) — there is no hot reload
 for Python plugins.
 
+**Plugin `jev-approvals`, provider `typesafe-jev`.** Those are deliberately different and
+independent: the plugin is named for what it does, the provider for the model you select in
+`auxiliary.approval.provider`. Discovery only checks `kind: model-provider` and imports the
+directory; the `ProviderProfile` decides the provider name.
+
 No `plugins enable` needed: `kind: model-provider` is discovered independently of
 `plugins.enabled`. That kind is also **required**, and for a non-obvious reason —
 `hermes_cli.auth.PROVIDER_REGISTRY` is built at import time by walking `list_providers()`, and
@@ -296,8 +301,8 @@ The OpenRouter filter matters: decision models are absent from the unfiltered li
 Verify:
 
 ```bash
-hermes plugins doctor ~/.hermes/plugins/typesafe-jev --ci
-cd ~/.hermes/plugins/typesafe-jev
+hermes plugins doctor ~/.hermes/plugins/jev-approvals --ci
+cd ~/.hermes/plugins/jev-approvals
 python3 tests/test_real_load.py    # both registries + both routes, no key needed
 python3 tests/test_hardening.py    # offline, no key needed
 python3 tests/test_routes.py       # live: both routes must agree

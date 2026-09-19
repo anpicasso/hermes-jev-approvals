@@ -1,4 +1,9 @@
-"""typesafe-jev — TypeSafe's Jev decision model as Hermes' smart-approval reviewer.
+"""jev-approvals — TypeSafe's Jev decision model as Hermes' smart-approval reviewer.
+
+The PLUGIN is `jev-approvals` (what it does); the PROVIDER it registers is `typesafe-jev`
+(what goes in `auxiliary.approval.provider`). Those are independent: providers/ discovery
+only checks `kind: model-provider` and imports the directory, and the ProviderProfile below
+decides the provider name.
 
 PROOF OF CONCEPT. APPROVALS ONLY. This provider serves exactly one auxiliary task
 (`auxiliary.approval`) and refuses everything else, because Jev emits no strings and
