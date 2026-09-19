@@ -5,6 +5,12 @@ Every number here comes from a run on one machine (Linux, 2 vCPU, 7 GB, no GPU) 
 
 ## Method
 
+> **Smart approval mode is a precondition for everything here.** The provider is only
+> consulted when `approvals.mode: smart`; in the other modes the aux LLM (and therefore this
+> reviewer) never runs, and `_run_approval_guards` falls straight to the human prompt or
+> auto-approval instead. Set it with `hermes config set approvals.mode smart` before
+> installing, or the plugin is dead code.
+
 Both routes run through **core's own** `tools/approval_smart.py::_smart_approve` — the real
 guardian, the real system prompt, the real dispatch. The only variable is what
 `auxiliary.approval.provider` resolves to. Nothing about the approval logic is
