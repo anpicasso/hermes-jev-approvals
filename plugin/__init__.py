@@ -5,7 +5,7 @@ The PLUGIN is `jev-approvals` (what it does); the PROVIDER it registers is `type
 only checks `kind: model-provider` and imports the directory, and the ProviderProfile below
 decides the provider name.
 
-PROOF OF CONCEPT. APPROVALS ONLY. This provider serves exactly one auxiliary task
+APPROVALS ONLY. This provider serves exactly one auxiliary task
 (`auxiliary.approval`) and refuses everything else, because Jev emits no strings and
 therefore cannot do chat.
 

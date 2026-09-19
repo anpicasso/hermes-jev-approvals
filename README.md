@@ -3,18 +3,15 @@
 **Smart command approvals for [Hermes Agent](https://github.com/NousResearch/hermes-agent),
 served by [TypeSafe's](https://typesafe.ai) Jev decision model.**
 
-> ## ⚠️ Proof of concept
->
-> This is exploratory work from a few sessions of tinkering, not a maintained product. It
-> has **never run in anger** — every number below comes from offline benchmarks on one
-> machine, against an API that launched days earlier. Read the source before installing it,
-> and evaluate it on your own traffic before letting it gate anything you care about.
->
 > **Scope: approvals only.** The provider serves exactly one auxiliary task
 > (`auxiliary.approval`) and refuses every other prompt. It cannot do chat, cannot generate
 > text, and must not be set as a chat provider. It hooks into nothing else: it is the model
 > behind a gate Hermes already owns. Works against Hermes core as it ships — no core change is
 > assumed anywhere in this repo.
+>
+> Every number below is measured, with its method and caveats in
+> [docs/METRICS.md](docs/METRICS.md). Thresholds were tuned on one machine's traffic, so
+> evaluate them against your own before relying on them — see [Limitations](#limitations).
 
 ## What it does
 
