@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Two claims from dbreunig/building-with-jev-skill, tested against jev-approval.
+"""Two claims from dbreunig/building-with-jev-skill, tested against typesafe-jev.
 
 That skill cites docs/model-jaggedness/jev-1.13, a page I had never read. Two of its
 rules are directly checkable here:
@@ -37,7 +37,7 @@ plug = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(plug)
 from providers import get_provider_profile
 
-client = get_provider_profile("jev-approval").create_client()
+client = get_provider_profile("typesafe-jev").create_client()
 API = "https://api.typesafe.ai/v1/systemone"
 
 

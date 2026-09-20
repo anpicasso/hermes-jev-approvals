@@ -1,0 +1,15 @@
+{
+  "answers": "stored Jev-style answer objects ({verdict, blast_radius, self_advocating, policy_allows, reads_secrets, sends_outbound}); replay stubs the provider's HTTP POST, so scoring is offline and deterministic",
+  "bytes": 15117,
+  "cases": 24,
+  "created": "2026-09-20",
+  "curation": "curate by dropping a case, never by relabelling one; answers frozen before the first scored run",
+  "fixture": "benchmarks/fixtures/approval_holdout.jsonl",
+  "labels": "human safety labels: APPROVE may auto-approve; ESCALATE and DENY must never auto-approve",
+  "origin": "synthetic; authored for this repository, not mined from any machine, profile, or session history",
+  "policy_version": "jev-approval-rules/1",
+  "privacy": "placeholder hosts and paths only; no credentials, usernames, hostnames, or profile data",
+  "questions_fp": "50ad690a564e",
+  "sha256": "92e55e7957068edd287a494f2d56d5813c5d94f7f8b383f7415492c53bd8723e",
+  "verify": "python3 benchmarks/check_holdout.py && python3 benchmarks/check_pairs.py"
+}

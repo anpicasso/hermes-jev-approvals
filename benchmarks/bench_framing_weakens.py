@@ -33,7 +33,7 @@ plug = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(plug)
 from providers import get_provider_profile
 
-client = get_provider_profile("jev-approval").create_client()
+client = get_provider_profile("typesafe-jev").create_client()
 
 
 def verdict(cmd, desc="recursive delete"):

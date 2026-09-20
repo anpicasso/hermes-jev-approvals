@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import importlib.util
 import json
 import logging
 import os
@@ -214,6 +215,33 @@ _FLAGGED_RE = re.compile(r"flagged as:\s*(.+?)(?:\n|$)")
 
 
 PLUGIN_ID = "jev-approvals"
+
+
+def _load_policy():
+    """The sibling rule chain, in every way this file gets imported.
+
+    Hermes' loader imports a plugin directory as a package
+    (`hermes_cli/plugins_loader.py`, `hermes_plugins.<slug>`), so the relative import is the
+    first choice and caches under that package name. The offline tests, the plugins-doctor
+    probe and the benchmark harnesses exec THIS file instead, some with no package at all —
+    the relative import raises there, so the same file is loaded by path under its own
+    `jev_`-prefixed name (`jev_policy`, never a bare `policy`, so a loose module of that
+    name on sys.path can never shadow it). Both routes execute the same code.
+    """
+    try:
+        from . import jev_policy
+        return jev_policy
+    except ImportError:
+        spec = importlib.util.spec_from_file_location(
+            "jev_policy", Path(__file__).resolve().parent / "jev_policy.py")
+        if spec is None or spec.loader is None:
+            raise ImportError("jev-approvals: jev_policy.py is missing or not loadable")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+
+_policy = _load_policy()
 
 
 def _setting(key: str, default: Any = None) -> Any:
@@ -907,41 +935,13 @@ class JevClient:
             reads_secrets = _noul(answers, "reads_secrets")
             sends_outbound = _noul(answers, "sends_outbound")
 
-            # Policy, in code, above the model's raw pick. Order matters and is versioned by
-            # _POLICY_VERSION; this PR only names each existing branch for audit replay.
-            if advocating >= 0.6:
-                rule = "self_advocating"
-                if verdict == "DENY":
-                    reason = f"model DENY preserved; self_advocating {advocating:.2f} >= 0.6"
-                else:
-                    verdict, reason = "ESCALATE", f"self_advocating {advocating:.2f} >= 0.6"
-            elif reads_secrets >= 0.7 and sends_outbound >= 0.7:
-                rule = "secrets_exfil"
-                verdict, reason = "DENY", (f"reads_secrets {reads_secrets:.2f} + "
-                                           f"sends_outbound {sends_outbound:.2f} >= 0.7")
-            elif reads_secrets >= 0.7:
-                rule = "secrets_read"
-                if verdict == "DENY":
-                    reason = f"model DENY preserved; reads_secrets {reads_secrets:.2f} >= 0.7"
-                else:
-                    verdict, reason = "ESCALATE", f"reads_secrets {reads_secrets:.2f} >= 0.7"
-            elif policy_ok >= 0.7 and blast < 2.0 and policy:
-                rule = "policy_allow"
-                verdict, reason = "APPROVE", f"operator_policy allows ({policy_ok:.2f})"
-            elif verdict == "APPROVE" and (confidence < 0.55 or blast >= 1.6):
-                rule = "low_confidence" if confidence < 0.55 else "high_blast"
-                verdict, reason = "ESCALATE", (f"confidence {confidence:.2f} < 0.55"
-                                               if confidence < 0.55
-                                               else f"blast_radius {blast:.2f} >= 1.6")
-            else:
-                rule, reason = "model_verdict", f"model verdict (conf {confidence:.2f})"
-            if verdict not in VERDICT_CRITERIA:
-                rule = "invalid_verdict"
-                verdict, reason = "ESCALATE", "verdict not one of APPROVE/DENY/ESCALATE"
-            # A command too long to send in full was judged on a cut: never auto-approve it.
-            if truncated and verdict == "APPROVE":
-                rule = "truncated"
-                verdict, reason = "ESCALATE", "command truncated before judgement"
+            # The rule chain is `jev_policy.apply_policy` (pure, golden-tested; loaded at the
+            # top of this file). Order and thresholds there are versioned by _POLICY_VERSION.
+            verdict, rule, reason = _policy.apply_policy(
+                verdict=verdict, confidence=confidence, blast_radius=blast,
+                self_advocating=advocating, policy_allows=policy_ok,
+                reads_secrets=reads_secrets, sends_outbound=sends_outbound,
+                has_policy=bool(policy), truncated=truncated)
 
             usage = data.get("usage", {})
             logger.info("%s %s [%s] (conf %.2f, blast %.2f, advocating %.2f, "
