@@ -150,11 +150,23 @@ not answered is a failure, not a default: the whole point of a gate is that 'no 
 
 **The command is redacted before it leaves the machine.** It was previously POSTed verbatim
 to a third-party API, and the corpus behind these metrics contained a live bot token. Now it
-passes through core's own `agent.redact.redact_sensitive_text(..., force=True)`, plus one
-extra pass for credential-bearing CLI flags (`--password=…`, `--token=…`) that core's
-redactor does not cover, since it never had to handle shell-command shapes. `force=True`
+passes through core's own `agent.redact.redact_sensitive_text(..., force=True,
+redact_url_credentials=True)`, plus passes for credential-bearing CLI flags, URL/query
+credentials, Cookie headers, and `curl -u`. Negative tests protect ordinary `-u`, `-b`, and
+Docker UID/port flags from being masked. `force=True`
 because this is a third-party egress boundary, not a display surface. Best-effort, not a
 guarantee — as every other gate that does this says too.
+
+**The endpoint is a credential boundary.** Requests require HTTPS on the default port, an
+exact known host or its real subdomain, and a URL without embedded credentials, query, or
+fragment. Cross-origin redirects are refused so `Authorization` cannot follow an open
+redirect. Invalid endpoints raise and Hermes escalates to a human; validation happens at
+request time so core cannot replace this provider with its generic OpenAI fallback.
+
+**Typed answers are validated as contracts.** Choice confidence and probabilities must be
+finite and in range, the distribution must cover exactly the requested options and sum to
+approximately one, and the selected option must be an argmax. Scores must stay inside their
+rubric. A malformed response raises and therefore escalates instead of becoming an approval.
 
 **Long commands are capped, and a truncated command is never auto-approved.** 4000 chars,
 head+tail with an explicit `…[N chars elided]` marker so the model sees the cut rather than
@@ -324,8 +336,8 @@ auxiliary:
 > `tests/test_real_load.py` asserts all three config shapes, so this cannot drift.
 
 That is all. The plugin reads the OpenRouter key from Hermes' `openrouter` credential pool,
-and picks the endpoint from the host: `openrouter.ai` -> `/decisions`, anything else ->
-`/systemone`.
+and picks the endpoint from the host: `openrouter.ai` (or a real subdomain) -> `/decisions`;
+`api.typesafe.ai` -> `/systemone`. Every other host is refused before a key is resolved.
 
 **Only if the key is not in a Hermes credential pool**, name its variable in the plugin's own
 settings:
@@ -373,6 +385,7 @@ hermes plugins doctor ~/.hermes/plugins/jev-approvals --ci
 cd ~/.hermes/plugins/jev-approvals
 python3 tests/test_real_load.py    # registries, picker rows, config shapes — no key needed
 python3 tests/test_hardening.py    # offline, no key needed
+python3 tests/test_boundary.py     # offline + loopback only; egress/response boundary
 python3 tests/test_routes.py       # live: both routes must agree
 python3 tests/test_provider.py     # live, needs a key
 ```
