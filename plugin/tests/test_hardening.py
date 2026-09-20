@@ -160,6 +160,7 @@ try:
     raise AssertionError("401 should not be retried, and should raise")
 except RuntimeError as exc:
     assert "401" in str(exc) and "API key" in str(exc), exc
+    assert getattr(exc, "status_code", None) == 401, "core cannot classify the auth failure"
 assert state["n"] == 1, f"401 was retried {state['n']} times"
 
 opener, state = failing_urlopen([429, 429, 429])
@@ -167,8 +168,8 @@ jev.urllib.request.urlopen = opener
 try:
     _REAL_POST("https://api.typesafe.ai/v1", {"state": {}}, 30.0)
     raise AssertionError("exhausted retries must raise so core escalates")
-except RuntimeError:
-    pass
+except RuntimeError as exc:
+    assert getattr(exc, "status_code", None) == 429, "core cannot classify the exhausted rate limit"
 assert state["n"] == jev._MAX_ATTEMPTS, state["n"]
 _json.load = _real_load
 print(f"3. retries 429/5xx/network up to {jev._MAX_ATTEMPTS}, raises on 401  ok")

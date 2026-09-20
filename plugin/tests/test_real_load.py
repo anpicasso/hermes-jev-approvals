@@ -210,4 +210,20 @@ finally:
         os.environ.pop(_v, None)
 print("settings.key_env: aggregator-only, pool first, default var, bad value inert")
 
+# 6. urllib-based provider errors must carry the same status metadata SDK errors do,
+# or core's auxiliary recovery ladder cannot classify them after our bounded retries.
+from agent.auxiliary_client import (  # noqa: E402
+    _is_auth_error, _is_rate_limit_error, _is_transient_transport_error,
+)
+
+for status, matcher in (
+    (401, _is_auth_error),
+    (429, _is_rate_limit_error),
+    (503, _is_transient_transport_error),
+):
+    exc = RuntimeError(f"{PROVIDER}: HTTP {status}")
+    setattr(exc, "status_code", status)
+    assert matcher(exc), f"core does not classify status-bearing HTTP {status}"
+print("error contract: core classifies status-bearing 401/429/503 exceptions")
+
 print("\nboth registries have the provider, and both routes build our client")

@@ -1,5 +1,5 @@
 name: jev-approvals
-version: "0.2.0"
+version: "0.2.1"
 # model-provider is required: it is the only kind providers/ discovery imports, and that
 # import is what registers the profile into PROVIDER_REGISTRY (built at hermes_cli.auth
 # import time). A provider registered later — e.g. from register(ctx) under `standalone` —

@@ -327,6 +327,9 @@ def _post(base_url: str, body: Dict[str, Any], timeout: float) -> Dict[str, Any]
         except urllib.error.HTTPError as exc:
             retryable = exc.code in _RETRY_STATUS or exc.code >= 500
             last = RuntimeError(f"{PROVIDER_NAME}: HTTP {exc.code} {_http_hint(exc.code)}")
+            # Core's auxiliary recovery ladder classifies auth/rate-limit/server failures
+            # from this attribute. SDK exceptions carry it natively; urllib's do not.
+            setattr(last, "status_code", exc.code)
             if not retryable:
                 raise last from exc
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
