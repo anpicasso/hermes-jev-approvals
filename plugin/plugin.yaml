@@ -1,11 +1,11 @@
 name: jev-approvals
-version: "0.2.1"
+version: "0.2.2"
 # model-provider is required: it is the only kind providers/ discovery imports, and that
 # import is what registers the profile into PROVIDER_REGISTRY (built at hermes_cli.auth
 # import time). A provider registered later — e.g. from register(ctx) under `standalone` —
 # is absent from that registry and resolve_provider_client rejects the name as unknown.
 kind: model-provider
-description: "APPROVALS ONLY. Registers TypeSafe's Jev decision model as a Hermes provider for the single purpose of serving `auxiliary.approval` when `approvals.mode: smart`. Jev returns typed probabilities instead of text, which is the native shape of the guardian's APPROVE/DENY/ESCALATE question; measured on 156 real commands from this machine's own history it was 9.8x faster than the aux chat model with 4.2x fewer human prompts. Two routes, chosen by `base_url`: TypeSafe direct (`/systemone`) or OpenRouter, which hosts the same model at the same published price (`/decisions`). It CANNOT generate text, so it refuses any prompt that is not the smart-approval guardian's — never set it as a chat provider or for any other auxiliary task."
+description: "APPROVALS ONLY. Registers TypeSafe's Jev decision model as a Hermes provider for the single purpose of serving `auxiliary.approval` when `approvals.mode: smart`. Jev returns typed probabilities instead of text, the native shape of the guardian's APPROVE/DENY/ESCALATE question. An original 156-command baseline measured 9.8x lower latency and 4.2x fewer human prompts than one configured aux chat model; this is baseline-specific, not a universal speedup, and the README links an independent v0.2.1 live-sandbox study. Two routes, chosen by `base_url`: TypeSafe direct (`/systemone`) or OpenRouter (`/decisions`). It registers no hooks and CANNOT generate text, so it refuses any prompt that is not the smart-approval guardian's — never set it as a chat provider or for any other auxiliary task."
 author: "anpicasso"
 requires_env:
   - TYPESAFE_API_KEY

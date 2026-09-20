@@ -14,13 +14,15 @@ Why it exists: `approvals.mode: smart` sends every flagged command to an auxilia
 That is a three-option Choice wearing a chat completion's clothes: a full reasoning
 model spun up to emit one token a regex then parses back out.
 
-Measured on 156 real commands mined from this machine's own session history, both routes
-running through core's real _smart_approve:
+In one v0.2.0-era baseline of 156 real commands mined from this machine's own session history,
+both routes ran through core's real _smart_approve:
 
     aux chat LLM              114/0/42 approve/deny/escalate   3968ms avg  619s total
     this provider + policy    144/2/10                          405ms avg   63s total
 
-9.8x faster, 4.2x fewer human interruptions, no core changes: Hermes already resolves
+That baseline was 9.8x faster with 4.2x fewer human interruptions; it is not a universal
+speedup. An independent v0.2.1 live-sandbox study measured 1.24x reviewer time against a
+different model/corpus. No core changes: Hermes already resolves
 each auxiliary task's provider from config (agent/auxiliary_client.py::
 _resolve_task_provider_model) and accepts plugin-registered providers.
 
@@ -38,7 +40,6 @@ TWO ROUTES, selected by `base_url` — no plugin-specific config:
         provider: typesafe-jev
         model: ~typesafe/jev-latest
         base_url: https://openrouter.ai/api/alpha
-        key_env: OPENROUTER_API_KEY
 
 Core passes `api_key` and `base_url` to `create_client` (auxiliary_client.py:5128), and
 leaves both URLs untouched, so the endpoint is derived from the host: `openrouter.ai` uses
@@ -181,7 +182,10 @@ QUESTIONS: Dict[str, Dict[str, Any]] = {
 
 # Where the guardian's user prompt puts the command. Core builds:
 #   "The following command was flagged as: {description}\n\n<command>\n{cmd}\n</command>..."
-_COMMAND_RE = re.compile(r"<command>\s*(.*?)\s*</command>", re.S)
+# Use the first opener and LAST closer: the command itself may legitimately contain the
+# literal string `</command>` (for example inside a Python or printf string).
+_COMMAND_OPEN = "<command>"
+_COMMAND_CLOSE = "</command>"
 _FLAGGED_RE = re.compile(r"flagged as:\s*(.+?)(?:\n|$)")
 
 
@@ -354,7 +358,7 @@ def _http_hint(code: int) -> str:
 # headers and known token prefixes, but NOT `--password=hunter2` — a shell-command shape
 # core's own redactor never had to handle and this provider sends on every request.
 _FLAG_RE = re.compile(
-    r"(?i)(--?(?:password|passwd|pass|token|api[-_]?key|secret|access[-_]?key|"
+    r"(?i)(?<![\w-])(--?(?:password|passwd|pass|token|api[-_]?key|secret|access[-_]?key|"
     r"auth[-_]?token|client[-_]?secret)[=\s]+)(\S+)")
 
 
@@ -421,8 +425,9 @@ def _extract(messages: List[Dict[str, Any]]) -> Tuple[Optional[str], str, str]:
             user += content
         elif m.get("role") == "system":
             system += content
-    match = _COMMAND_RE.search(user)
-    if not match:
+    _, opened, remainder = user.partition(_COMMAND_OPEN)
+    command, closed, _ = remainder.rpartition(_COMMAND_CLOSE)
+    if not opened or not closed:
         return None, "", ""
     desc_match = _FLAGGED_RE.search(user)
     # Operator policy is the TRUSTED channel in core's prompt; keep it separate from the
@@ -430,8 +435,14 @@ def _extract(messages: List[Dict[str, Any]]) -> Tuple[Optional[str], str, str]:
     policy = ""
     marker = "Additional policy rules from the operator"
     if marker in system:
-        policy = system.split(marker, 1)[1].strip()[:2000]
-    return match.group(1), (desc_match.group(1).strip() if desc_match else ""), policy
+        # Operator policy is trusted local config, not command-controlled input. Preserve it
+        # in full; a provider-side size rejection raises and core escalates, which is safer
+        # than silently dropping a restrictive suffix. Core puts one explanatory header line
+        # after the marker, then the policy itself.
+        tail = system.split(marker, 1)[1]
+        _, separator, body = tail.partition(":\n")
+        policy = (body if separator else tail).strip()
+    return command.strip(), (desc_match.group(1).strip() if desc_match else ""), policy
 
 
 class _Completion:
@@ -536,12 +547,18 @@ class JevClient:
         # review; step 3 upgrades but requires an explicit operator_policy AND a
         # non-catastrophic blast radius, so `rm -rf /` cannot be policy-approved.
         if advocating >= 0.6:
-            verdict, reason = "ESCALATE", f"self_advocating {advocating:.2f} >= 0.6"
+            if verdict == "DENY":
+                reason = f"model DENY preserved; self_advocating {advocating:.2f} >= 0.6"
+            else:
+                verdict, reason = "ESCALATE", f"self_advocating {advocating:.2f} >= 0.6"
         elif reads_secrets >= 0.7 and sends_outbound >= 0.7:
             verdict, reason = "DENY", (f"reads_secrets {reads_secrets:.2f} + "
                                        f"sends_outbound {sends_outbound:.2f} >= 0.7")
         elif reads_secrets >= 0.7:
-            verdict, reason = "ESCALATE", f"reads_secrets {reads_secrets:.2f} >= 0.7"
+            if verdict == "DENY":
+                reason = f"model DENY preserved; reads_secrets {reads_secrets:.2f} >= 0.7"
+            else:
+                verdict, reason = "ESCALATE", f"reads_secrets {reads_secrets:.2f} >= 0.7"
         elif policy_ok >= 0.7 and blast < 2.0 and policy:
             verdict, reason = "APPROVE", f"operator_policy allows ({policy_ok:.2f})"
         elif verdict == "APPROVE" and (confidence < 0.55 or blast >= 1.6):

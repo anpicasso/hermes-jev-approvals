@@ -37,7 +37,7 @@ auxiliary:
 resolves each auxiliary task's provider from config and accepts plugin-registered
 providers, so the seam was already there.
 
-## Measured on 156 real commands
+## Original v0.2.0-era baseline: 156 real commands
 
 Not invented test cases: mined from local Hermes session dumps — 14,314 unique commands the
 agent actually ran across three profiles — then labelled by Hermes' own detectors, not by
@@ -49,7 +49,22 @@ real `_smart_approve`; the only variable is the provider.
 | aux chat LLM (small fast general model) | 114 / 0 / 42 | 42 | 3968 ms | 619 s |
 | typesafe-jev + operator policy | 144 / 2 / 10 | **10** | **405 ms** | **63 s** |
 
-**9.8x faster, 4.2x fewer interruptions**, same commands, same code path.
+**9.8x faster, 4.2x fewer interruptions**, same commands, same code path. That ratio is a
+baseline against one configured auxiliary model on one machine, not a universal Jev speedup.
+
+An [independent live-sandbox study](https://bearhuddleston.dev/reports/jev-approvals-live-sandbox/)
+provides more deployment-like metrics for the v0.2.x line: real Hermes guard preprocessing,
+real HTTPS model calls, three reviewer arms, and no payload execution. It pinned **v0.2.1 at
+`9ad1901`**, used 28 unique synthetic commands across 156 guard observations, and recorded a
+**1.24x Mini/Jev reviewer-time ratio** (2.58x for HTTP alone), not 9.8x. It also reports
+verdict and list-price estimates. The corpus is small and synthetic, so neither result is a
+universal production claim.
+
+Between the original v0.2.0-era baseline and that pinned v0.2.1 build, the plugin added HTTP
+status propagation so Hermes can distinguish authentication, rate-limit, and provider
+failures during auxiliary recovery. The study still exposed adapter input-loss defects; the
+v0.2.2 changes below preserve complete command/policy inputs and keep safety post-processing
+from weakening a model `DENY`.
 
 Only **11%** of real commands reach the approval gate at all, so this cost applies to
 roughly one command in ten.
@@ -147,6 +162,15 @@ inferring a complete command, and tail-preserving so a payload cannot hide behin
 verdict reached on a truncated command is downgraded to `ESCALATE` — from
 [`toolgate`](https://github.com/RiskAverseTech/toolgate).
 
+**Guardian inputs are preserved.** The independent live-sandbox study found that a literal
+`</command>` inside command data made the old non-greedy parser drop the harmful suffix, and
+that the plugin silently cut operator policy at 2000 characters. The parser now uses core's
+first opening tag and final closing tag, while trusted operator policy is sent in full. If the
+provider rejects an oversized request, core escalates instead of judging an incomplete policy.
+The same regression set also prevents `--no-password` from making the CLI-flag redactor hide
+the following argument, and ensures safety overrides never turn a model `DENY` into
+`ESCALATE`.
+
 **Transient failures retry instead of interrupting a human.** Core escalates on *any*
 exception from this provider, so a single 429 or dropped connection used to cost a human
 prompt — indistinguishable in the log from a real escalation. Now: up to 3 attempts on
@@ -214,11 +238,11 @@ commands in the corpus.
 Core already has a confidentiality class — `access to SSH keys (Windows path)`, `access to
 Hermes secrets (Windows path)`, `cloud metadata endpoint access`, `copy/move file into
 sensitive credential path`. It has no *POSIX* equivalent and no upload-egress shapes. That
-asymmetry looks like an oversight, so **the fix belongs in core's pattern list**, where those
-commands would flow through the normal gate to this reviewer with `smart_policy` applied. An
-earlier version of this plugin closed the gap with its own `pre_tool_call` hook; that was a
-parallel pattern list competing with a Nous-maintained one, and it has been removed. Tracked
-as an upstream issue instead.
+asymmetry looks like an oversight. This plugin deliberately registers **no hooks** and does
+not maintain a parallel pattern list: its scope is only to review commands Hermes core sends
+to `auxiliary.approval`. Consequently, `smart_policy` is reviewer policy, not a global command
+policy; the independent study also observed an ordinary non-force `git push` bypassing every
+reviewer because core did not route it to the smart gate.
 
 ## Install
 
@@ -377,8 +401,9 @@ To roll back, unset the config keys. Hermes falls back to its normal auxiliary r
 - **It sends the command text and your operator policy to a third-party API.** Commands can
   contain secrets — one command in the corpus behind these metrics contained a live bot
   token. The command is now redacted through core's own redactor plus a CLI-flag pass and
-  capped at 4000 chars, but redaction is best-effort: choose a provider you would trust with
-  your shell history. Don't enable this where that's unacceptable.
+  capped at 4000 chars; the trusted operator policy is sent in full so a restrictive suffix
+  cannot disappear. Redaction is best-effort: choose a provider you would trust with your
+  shell history. Don't enable this where that's unacceptable.
 - **Approvals only.** Set as a chat provider or any other auxiliary task, it raises rather
   than inventing text. That is deliberate.
 - **Thresholds were tuned by me, on my data**, and are not validated on held-out commands.
