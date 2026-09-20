@@ -157,11 +157,13 @@ Docker UID/port flags from being masked. `force=True`
 because this is a third-party egress boundary, not a display surface. Best-effort, not a
 guarantee — as every other gate that does this says too.
 
-**The endpoint is a credential boundary.** Requests require HTTPS on the default port, an
-exact known host or its real subdomain, and a URL without embedded credentials, query, or
-fragment. Cross-origin redirects are refused so `Authorization` cannot follow an open
-redirect. Invalid endpoints raise and Hermes escalates to a human; validation happens at
-request time so core cannot replace this provider with its generic OpenAI fallback.
+**The endpoint is a credential boundary.** Requests require HTTPS on the default port and a
+URL without embedded credentials, query, or fragment. TypeSafe and OpenRouter have
+zero-config presets; another host is accepted only with an explicit plugin-level `key_env`,
+and uses `base_url` as its complete decision endpoint. It can therefore never implicitly
+inherit a TypeSafe/OpenRouter key. Cross-origin redirects are refused so `Authorization` cannot follow
+an open redirect. Invalid endpoints raise and Hermes escalates to a human; validation happens
+at request time so core cannot replace this provider with its generic OpenAI fallback.
 
 **Typed answers are validated as contracts.** Choice confidence and probabilities must be
 finite and in range, the distribution must cover exactly the requested options and sum to
@@ -357,7 +359,7 @@ auxiliary:
 
 That is all. The plugin reads the OpenRouter key from Hermes' `openrouter` credential pool,
 and picks the endpoint from the host: `openrouter.ai` (or a real subdomain) -> `/decisions`;
-`api.typesafe.ai` -> `/systemone`. Every other host is refused before a key is resolved.
+`api.typesafe.ai` -> `/systemone`. These are convenience presets, not an allowlist.
 
 **Only if the key is not in a Hermes credential pool**, name its variable in the plugin's own
 settings:
@@ -367,12 +369,41 @@ plugins:
   entries:
     jev-approvals:
       settings:
-        key_env: SOME_AGGREGATOR_KEY     # optional; aggregator routes only
+        key_env: SOME_AGGREGATOR_KEY     # optional; required for a custom host
 ```
 
-Resolution order for an aggregator host: its Hermes credential pool -> `settings.key_env` ->
-the aggregator's default variable (`OPENROUTER_API_KEY`). The TypeSafe route ignores this
-setting entirely.
+Resolution order for a known aggregator host: its Hermes credential pool ->
+`settings.key_env` -> the aggregator's default variable (`OPENROUTER_API_KEY`). The TypeSafe
+route ignores this setting entirely.
+
+### Any other Jev-compatible provider
+
+No plugin release or catalog bump is needed. Configure the provider's **complete decision
+endpoint**, model id, and a plugin-level environment-variable name:
+
+```yaml
+auxiliary:
+  approval:
+    provider: typesafe-jev
+    model: provider-model-id
+    base_url: https://jev.example/v1/systemone
+
+plugins:
+  entries:
+    jev-approvals:
+      settings:
+        key_env: MY_JEV_PROVIDER_KEY
+```
+
+Put `MY_JEV_PROVIDER_KEY=...` in the environment or `~/.hermes/.env`. Do **not** put
+`api_key` or `key_env` under `auxiliary.approval`: core would resolve the provider as
+`custom` and bypass this plugin.
+
+The custom `base_url` is used exactly as written: no hidden `/systemone` or `/decisions`
+suffix is appended. Custom hosts never implicitly inherit the TypeSafe or OpenRouter credential. HTTPS,
+URL-credential/query rejection, and same-origin redirect enforcement still apply. The live
+model picker falls back to the built-in Jev choices because an arbitrary endpoint has no
+standard model-catalog contract.
 
 ### Which route to pick
 

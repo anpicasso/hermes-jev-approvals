@@ -5,17 +5,17 @@ version: "0.3.0"
 # import time). A provider registered later — e.g. from register(ctx) under `standalone` —
 # is absent from that registry and resolve_provider_client rejects the name as unknown.
 kind: model-provider
-description: "APPROVALS ONLY. Registers TypeSafe's Jev decision model as a Hermes provider for the single purpose of serving `auxiliary.approval` when `approvals.mode: smart`. Jev returns typed probabilities instead of text, the native shape of the guardian's APPROVE/DENY/ESCALATE question. An original 156-command baseline measured 9.8x lower latency and 4.2x fewer human prompts than one configured aux chat model; this is baseline-specific, not a universal speedup, and the README links an independent v0.2.1 live-sandbox study. Two routes, chosen by `base_url`: TypeSafe direct (`/systemone`) or OpenRouter (`/decisions`). It registers no hooks and CANNOT generate text, so it refuses any prompt that is not the smart-approval guardian's — never set it as a chat provider or for any other auxiliary task."
+description: "APPROVALS ONLY. Registers TypeSafe's Jev decision model as a Hermes provider for the single purpose of serving `auxiliary.approval` when `approvals.mode: smart`. Jev returns typed probabilities instead of text, the native shape of the guardian's APPROVE/DENY/ESCALATE question. An original 156-command baseline measured 9.8x lower latency and 4.2x fewer human prompts than one configured aux chat model; this is baseline-specific, not a universal speedup, and the README links an independent v0.2.1 live-sandbox study. TypeSafe and OpenRouter are zero-config endpoint presets; any other Jev-compatible HTTPS decision endpoint can be selected with `base_url` plus an explicit plugin-level `key_env`. It registers no hooks and CANNOT generate text, so it refuses any prompt that is not the smart-approval guardian's — never set it as a chat provider or for any other auxiliary task."
 author: "anpicasso"
 requires_env:
   - TYPESAFE_API_KEY
 python_dependencies: []
-# Optional. Only needed for an aggregator route whose credential Hermes does not already
-# hold in a provider pool: `auxiliary.approval.api_key`/`key_env` cannot be used, because a
-# key set beside `base_url` in task config collapses the provider to "custom" and bypasses
-# this plugin entirely. Leave unset for TypeSafe direct, and for OpenRouter when
-# `hermes auth add openrouter` has been run.
+# Optional. This setting is the credential trust decision for a custom base_url and the
+# fallback for a known aggregator whose key Hermes does not already hold in a provider pool.
+# `auxiliary.approval.api_key`/`key_env` cannot be used: a key beside `base_url` in task
+# config collapses the provider to "custom" and bypasses this plugin. Leave unset for
+# TypeSafe direct, and for OpenRouter when `hermes auth add openrouter` has been run.
 config_schema:
   key_env:
     type: string
-    description: "Env var holding the API key for a non-TypeSafe (aggregator) base_url. Defaults to the aggregator's own variable — OPENROUTER_API_KEY for openrouter.ai."
+    description: "Environment variable holding the API key for a custom Jev decision endpoint. For a known aggregator it overrides the preset variable; OpenRouter otherwise uses OPENROUTER_API_KEY."
