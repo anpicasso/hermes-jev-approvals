@@ -192,13 +192,32 @@ it will not improve on a retry.
 
 ### Every decision is recorded
 
-`~/.hermes/jev-approval-decisions.jsonl`, mode `0600`, one line per decision with all six
-probabilities, the verdict, and **which rule decided it**:
+`$HERMES_HOME/jev-approval-decisions.jsonl` — the active profile's home, so each profile keeps
+its own log (`~/.hermes` when `HERMES_HOME` is unset). Mode `0600`, one JSON line per decision,
+**success or failure**, with all six probabilities, the verdict, and **which rule decided it**:
 
 ```json
-{"verdict": "ESCALATE", "reason": "blast_radius 1.74 >= 1.6", "confidence": 0.71,
- "blast_radius": 1.74, "reads_secrets": 0.02, "sends_outbound": 0.01, ...}
+{"ts": 1758382345.6, "ok": true, "verdict": "ESCALATE", "raw_verdict": "APPROVE",
+ "rule": "high_blast", "reason": "blast_radius 1.74 >= 1.6", "confidence": 0.71,
+ "blast_radius": 1.74, "reads_secrets": 0.02, "sends_outbound": 0.01, "latency_ms": 412,
+ "attempts": 1, "http_status": 200, "request_id": "…", "truncated": false,
+ "redacted": false, "policy_version": "jev-approval-rules/1", "policy_fp": "8f3c1a9d02be",
+ "questions_fp": "b41e77c0d9a2", ...}
 ```
+
+`raw_verdict` is the model's pick *before* the policy code touched it — the rows worth reading
+are the ones where it disagrees with `verdict`. `rule` names the branch that fired
+(`policy_allow`, `high_blast`, `low_confidence`, …); `latency_ms`, `attempts`,
+`http_status` and `request_id` come from the transport. `policy_fp` and `questions_fp` digest
+the operator policy and the question set — the policy text itself is never written — and
+`policy_version` moves when the rules do, so rows scored by different instruments cannot be
+pooled silently. `truncated` and `redacted` record what the model never saw.
+
+A failed judgement leaves a row too, written before the exception is re-raised: `ok: false`,
+`error_class` (`http_429`, `timeout`, `network`, `bad_json`, `bad_answer`, …), the error text,
+and the same transport fields. The exception is re-raised unchanged, so core escalates to a
+human exactly as it did before — logging never changes fail-to-human behaviour — and a row
+that cannot be written is dropped, not raised.
 
 The thresholds in this plugin were picked as round numbers. Nothing can re-derive them
 without the distribution of what real traffic actually scores — which is what this file
@@ -208,7 +227,8 @@ does a decision land within 0.1 of its threshold?* On the 21-case suite, once
 
 It rotates at 4 MB (~2000 decisions) keeping one previous generation, so it is bounded at two
 files and never needs a cron job. `JEV_APPROVAL_LOG` moves it,
-`JEV_APPROVAL_LOG_MAX_BYTES` resizes it, `=0` disables it. It never raises — logging must not
+`JEV_APPROVAL_LOG_MAX_BYTES` resizes it, `=0` disables it. The sink holds the redacted command
+— the same text that left the machine — never the raw one. It never raises — logging must not
 break a gate.
 
 ### Credential exposure was a real hole

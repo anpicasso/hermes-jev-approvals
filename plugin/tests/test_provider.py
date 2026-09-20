@@ -8,10 +8,14 @@
 
 Run with the hermes venv so `providers` and `tools` are importable.
 """
-import sys, time
+import sys, tempfile, time
 
 import os
 import pathlib
+
+# Live verification must not contaminate the user's production decision history.
+os.environ.setdefault("JEV_APPROVAL_LOG",
+                      str(pathlib.Path(tempfile.mkdtemp()) / "decisions.jsonl"))
 
 # Resolve Hermes' install and home from the environment so this runs on any machine.
 HERMES_HOME = pathlib.Path(os.environ.get("HERMES_HOME") or (pathlib.Path.home() / ".hermes"))

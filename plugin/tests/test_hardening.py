@@ -230,8 +230,8 @@ _LOG.unlink(missing_ok=True)
 for _ in range(12):
     verdict_for("git commit -m x", description="git operation")
 assert rotated.exists(), "log never rotated: it would grow without bound"
-assert _LOG.stat().st_size < jev._LOG_MAX_BYTES, _LOG.stat().st_size
-assert rotated.stat().st_size >= jev._LOG_MAX_BYTES, rotated.stat().st_size
+assert _LOG.stat().st_size <= jev._LOG_MAX_BYTES, _LOG.stat().st_size
+assert 0 < rotated.stat().st_size <= jev._LOG_MAX_BYTES, rotated.stat().st_size
 # both generations stay valid JSONL, so a re-score pass can read them
 for path in (_LOG, rotated):
     for line in path.read_text().splitlines():

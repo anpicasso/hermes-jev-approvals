@@ -47,6 +47,8 @@ leaves both URLs untouched, so the endpoint is derived from the host: `openroute
 """
 from __future__ import annotations
 
+import hashlib
+import importlib
 import json
 import logging
 import os
@@ -106,11 +108,20 @@ _DEADLINE_S = 25.0
 
 # Per-decision record. Thresholds here were picked as round numbers; nothing can re-derive
 # them without the distribution of what real traffic actually scores.
-_LOG_PATH = Path(os.environ.get("JEV_APPROVAL_LOG")
-                 or Path.home() / ".hermes" / "jev-approval-decisions.jsonl")
+_LOG_NAME = "jev-approval-decisions.jsonl"
 # ~2KB/row, so 4MB is roughly 2000 decisions — months of real traffic at 11% gate reach.
 # One generation kept: the point is a recent distribution, not an archive.
 _LOG_MAX_BYTES = int(os.environ.get("JEV_APPROVAL_LOG_MAX_BYTES") or 4_000_000)
+_POLICY_VERSION = "jev-approval-rules/1"
+_REQUEST_ID_HEADERS = ("x-typesafe-request-id", "x-generation-id",
+                       "request-id", "x-request-id")
+
+
+def _fingerprint(text: str) -> Optional[str]:
+    """Short stable SHA-256 for audit correlation; never store trusted policy text."""
+    if not text:
+        return None
+    return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:12]
 
 # The guardian's three verdicts, as Jev Choice options. Criteria are lifted from the
 # semantics tools/approval_smart.py's system prompt asks for, so behaviour matches what
@@ -185,6 +196,9 @@ QUESTIONS: Dict[str, Dict[str, Any]] = {
                         "remote destination?",
     },
 }
+
+_QUESTIONS_FP = _fingerprint(json.dumps(
+    QUESTIONS, sort_keys=True, separators=(",", ":"), ensure_ascii=True))
 
 # The exact option set the verdict question was asked with, derived from the rubric above, so
 # a rubric edit cannot leave the validation checking a set the request no longer sends.
@@ -410,6 +424,33 @@ def _urlopen(req: urllib.request.Request, timeout: float):
     return _OPENER.open(req, timeout=timeout)
 
 
+_TRANSPORT_KEY = "_jev_transport"
+
+
+def _request_id(headers: Any = None, payload: Any = None) -> Optional[str]:
+    """Best-effort provider correlation id, bounded and never invented."""
+    for name in _REQUEST_ID_HEADERS:
+        try:
+            value = (headers or {}).get(name)
+        except Exception:
+            value = None
+        if value:
+            return str(value)[:128]
+    if isinstance(payload, dict) and payload.get("id"):
+        return str(payload["id"])[:128]
+    return None
+
+
+def _tag_error(exc: Exception, *, attempts: int = 0, status_code: Optional[int] = None,
+               request_id: Optional[str] = None, error_class: str = "") -> Exception:
+    """Attach audit metadata without changing the exception type core already handles."""
+    setattr(exc, "attempts", attempts)
+    setattr(exc, "status_code", status_code)
+    setattr(exc, "request_id", request_id)
+    setattr(exc, "error_class", error_class or type(exc).__name__.lower())
+    return exc
+
+
 def _post(base_url: str, body: Dict[str, Any], timeout: float) -> Dict[str, Any]:
     """POST with bounded retries on transient failures only.
 
@@ -436,17 +477,31 @@ def _post(base_url: str, body: Dict[str, Any], timeout: float) -> Dict[str, Any]
             headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
         try:
             with _urlopen(req, min(timeout, remaining)) as resp:
-                return json.load(resp)
+                payload = json.load(resp)
+                if isinstance(payload, dict):
+                    payload[_TRANSPORT_KEY] = {
+                        "attempts": attempt,
+                        "http_status": int(getattr(resp, "status", 200) or 200),
+                        "request_id": _request_id(getattr(resp, "headers", None), payload),
+                    }
+                return payload
         except urllib.error.HTTPError as exc:
             retryable = exc.code in _RETRY_STATUS or exc.code >= 500
             last = RuntimeError(f"{PROVIDER_NAME}: HTTP {exc.code} {_http_hint(exc.code)}")
-            # Core's auxiliary recovery ladder classifies auth/rate-limit/server failures
-            # from this attribute. SDK exceptions carry it natively; urllib's do not.
-            setattr(last, "status_code", exc.code)
+            _tag_error(last, attempts=attempt, status_code=exc.code,
+                       request_id=_request_id(getattr(exc, "headers", None)),
+                       error_class=f"http_{exc.code}")
             if not retryable:
                 raise last from exc
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        except json.JSONDecodeError as exc:
             last = RuntimeError(f"{PROVIDER_NAME}: {type(exc).__name__}: {exc}")
+            _tag_error(last, attempts=attempt, error_class="bad_json")
+        except (urllib.error.URLError, TimeoutError) as exc:
+            last = RuntimeError(f"{PROVIDER_NAME}: {type(exc).__name__}: {exc}")
+            is_timeout = isinstance(exc, TimeoutError) or isinstance(
+                getattr(exc, "reason", None), TimeoutError)
+            _tag_error(last, attempts=attempt,
+                       error_class="timeout" if is_timeout else "network")
         if attempt < _MAX_ATTEMPTS:
             # Capped exponential backoff + jitter: several judgements can be in flight.
             delay = min(0.5 * 2 ** (attempt - 1), 4.0) + random.random() * 0.25
@@ -699,6 +754,43 @@ def _extract(messages: List[Dict[str, Any]]) -> Tuple[Optional[str], str, str]:
     return command.strip(), (desc_match.group(1).strip() if desc_match else ""), policy
 
 
+def _error_class(exc: BaseException) -> str:
+    tagged = getattr(exc, "error_class", None)
+    if tagged:
+        return str(tagged)
+    text = str(exc).lower()
+    if "credential found" in text:
+        return "no_credential"
+    if "typed answers, not token streams" in text:
+        return "stream_unsupported"
+    if "only serves the smart-approval" in text:
+        return "not_approval_request"
+    if "base_url" in text or "redirect" in text:
+        return "invalid_endpoint"
+    if any(part in text for part in (
+            "asked but not answered", "outside [0,1]", "outside the rubric",
+            "answers object", ".choice", ".probabilities", "not a number")):
+        return "bad_answer"
+    return type(exc).__name__.lower()
+
+
+def _audit_row(*, route: str = "", model_requested: str = "") -> Dict[str, Any]:
+    """One stable schema for success and failure; unknown values remain JSON null."""
+    return {
+        "ts": None, "ok": False, "verdict": None, "raw_verdict": None,
+        "rule": None, "reason": None, "model": None,
+        "model_requested": model_requested or None, "provider": None,
+        "route": route or None, "latency_ms": 0, "attempts": 0,
+        "http_status": None, "request_id": None, "error_class": None,
+        "error": None, "policy_version": _POLICY_VERSION, "policy_fp": None,
+        "has_policy": False, "questions_fp": _QUESTIONS_FP,
+        "confidence": None, "blast_radius": None, "self_advocating": None,
+        "policy_allows": None, "reads_secrets": None, "sends_outbound": None,
+        "truncated": False, "flagged_as": None, "command": None,
+        "redacted": False, "usage": None,
+    }
+
+
 class _Completion:
     """Minimal non-stream chat-completion duck type."""
 
@@ -747,136 +839,188 @@ class JevClient:
                                 messages: Optional[List[Dict[str, Any]]] = None,
                                 stream: bool = False, timeout: Optional[float] = None,
                                 **_: Any) -> Any:
-        if stream:
-            raise RuntimeError(f"{PROVIDER_NAME}: Jev returns typed answers, not token streams. "
-                               "Use it only for auxiliary.approval, which is non-streaming.")
-        command, description, policy = _extract(messages or [])
-        if command is None:
-            raise RuntimeError(
-                f"{PROVIDER_NAME}: this provider only serves the smart-approval guardian prompt "
-                "(a <command>...</command> block). It cannot generate text, so it must not be "
-                "set as a chat provider or for any other auxiliary task.")
-
-        # Redact BEFORE truncating, so a cut cannot split a secret into an unmatched
-        # fragment, and before anything is serialised toward a third party.
-        safe_command, truncated = _truncate(_redact(command))
-        state: Dict[str, Any] = {"command": safe_command}
-        if description:
-            state["flagged_as"] = _redact(description)[:500]
-        if policy:
-            state["operator_policy"] = policy
-
         # A provider/alias name is not a model id: core passes the resolved aux model, which
         # can be the provider's own name or the "auto" sentinel.
         model_id = (model or "").strip()
         if not model_id or model_id in ("auto", PROVIDER_NAME, "jev", "jev-approval"):
             model_id = self._default_model()
-        data = _post(self.base_url, {"state": state, "model": model_id,
-                                     "questions": QUESTIONS},
-                     timeout or self._timeout)
-        if not isinstance(data, dict):
-            raise RuntimeError(f"{PROVIDER_NAME}: response is a {type(data).__name__}, not "
-                               f"an answers object; escalating")
-        answers = data.get("answers")
-        if not isinstance(answers, dict):
-            raise RuntimeError(f"{PROVIDER_NAME}: response carries no answers object "
-                               f"(got {str(answers)[:80]}); escalating")
-        # An absent verdict is the one field with a safe reading — ESCALATE, the
-        # conservative direction. Everything present is validated in full: a Choice has an
-        # option set and a confidence, a Score has a rubric range, and neither may be
-        # malformed enough to become an approval. The hazard nouls may not default at all
-        # — see _noul.
-        verdict_answer = answers.get("verdict")
-        if verdict_answer is None:
-            verdict_answer = {}
-        if not isinstance(verdict_answer, dict):
-            raise RuntimeError(f"{PROVIDER_NAME}: verdict is not an answer object "
-                               f"(got {str(verdict_answer)[:80]}); escalating")
-        verdict = _choice(verdict_answer, "verdict", _VERDICT_OPTIONS) or "ESCALATE"
-        confidence = _finite(verdict_answer.get("confidence", 0.0), "verdict.confidence")
-        _probabilities(verdict_answer, "verdict", _VERDICT_OPTIONS, picked=verdict)
-        blast = _score(answers)
-        advocating = _noul(answers, "self_advocating")
-        policy_ok = _noul(answers, "policy_allows")
-        reads_secrets = _noul(answers, "reads_secrets")
-        sends_outbound = _noul(answers, "sends_outbound")
+        started = time.monotonic()
+        row = _audit_row(route=_route_for(self.base_url)[0], model_requested=model_id)
+        try:
+            if stream:
+                raise RuntimeError(
+                    f"{PROVIDER_NAME}: Jev returns typed answers, not token streams. "
+                    "Use it only for auxiliary.approval, which is non-streaming.")
+            command, description, policy = _extract(messages or [])
+            if command is None:
+                raise RuntimeError(
+                    f"{PROVIDER_NAME}: this provider only serves the smart-approval guardian "
+                    "prompt (a <command>...</command> block). It cannot generate text, so it "
+                    "must not be set as a chat provider or for any other auxiliary task.")
 
-        # Policy, in code, above the model's raw pick. Order matters:
-        #  1. a command arguing for its own approval is an injection attempt -> ESCALATE
-        #     (checked FIRST so operator policy can never be talked into approving it)
-        #  2. credential exposure -> never automatic. Exfiltration (read + send) is DENY;
-        #     a local read of secret material is ESCALATE, because legitimate work
-        #     sometimes needs it and only the human knows which.
-        #  3. the owner's own policy authorises it -> honour that, it is the trusted channel
-        #  4. an APPROVE the model is unsure about, or on severe blast radius -> ESCALATE
-        # ponytail: thresholds fixed. Steps 1, 2 and 4 only ever downgrade toward human
-        # review; step 3 upgrades but requires an explicit operator_policy AND a
-        # non-catastrophic blast radius, so `rm -rf /` cannot be policy-approved.
-        if advocating >= 0.6:
-            if verdict == "DENY":
-                reason = f"model DENY preserved; self_advocating {advocating:.2f} >= 0.6"
-            else:
-                verdict, reason = "ESCALATE", f"self_advocating {advocating:.2f} >= 0.6"
-        elif reads_secrets >= 0.7 and sends_outbound >= 0.7:
-            verdict, reason = "DENY", (f"reads_secrets {reads_secrets:.2f} + "
-                                       f"sends_outbound {sends_outbound:.2f} >= 0.7")
-        elif reads_secrets >= 0.7:
-            if verdict == "DENY":
-                reason = f"model DENY preserved; reads_secrets {reads_secrets:.2f} >= 0.7"
-            else:
-                verdict, reason = "ESCALATE", f"reads_secrets {reads_secrets:.2f} >= 0.7"
-        elif policy_ok >= 0.7 and blast < 2.0 and policy:
-            verdict, reason = "APPROVE", f"operator_policy allows ({policy_ok:.2f})"
-        elif verdict == "APPROVE" and (confidence < 0.55 or blast >= 1.6):
-            verdict, reason = "ESCALATE", (f"confidence {confidence:.2f} < 0.55"
-                                           if confidence < 0.55
-                                           else f"blast_radius {blast:.2f} >= 1.6")
-        else:
-            reason = f"model verdict (conf {confidence:.2f})"
-        if verdict not in VERDICT_CRITERIA:
-            verdict, reason = "ESCALATE", "verdict not one of APPROVE/DENY/ESCALATE"
-        # A command too long to send in full was judged on a cut: never auto-approve it.
-        if truncated and verdict == "APPROVE":
-            verdict, reason = "ESCALATE", "command truncated before judgement"
+            # Redact BEFORE truncating, so a cut cannot split a secret into an unmatched
+            # fragment, and before anything is serialised toward a third party.
+            redacted_command = _redact(command)
+            safe_command, truncated = _truncate(redacted_command)
+            safe_description = _redact(description)[:500] if description else ""
+            row.update(command=safe_command[:600], flagged_as=safe_description or None,
+                       truncated=truncated, redacted=(redacted_command != command or
+                                                       safe_description != description),
+                       has_policy=bool(policy), policy_fp=_fingerprint(policy))
+            state: Dict[str, Any] = {"command": safe_command}
+            if safe_description:
+                state["flagged_as"] = safe_description
+            if policy:
+                state["operator_policy"] = policy
 
-        usage = data.get("usage", {})
-        logger.info("%s %s [%s] (conf %.2f, blast %.2f, advocating %.2f, "
-                    "policy_allows %.2f, reads_secrets %.2f, sends_outbound %.2f) for %r",
-                    PROVIDER_NAME, verdict, reason, confidence, blast, advocating, policy_ok,
-                    reads_secrets, sends_outbound, safe_command[:60])
-        _record({"ts": time.time(), "verdict": verdict, "reason": reason,
-                 "model": data.get("model", model_id), "flagged_as": description,
-                 "provider": data.get("provider", ""), "route": _route_for(self.base_url)[0],
-                 "command": safe_command[:600], "truncated": truncated,
-                 "confidence": confidence, "blast_radius": blast,
-                 "self_advocating": advocating, "policy_allows": policy_ok,
-                 "reads_secrets": reads_secrets, "sends_outbound": sends_outbound,
-                 "has_policy": bool(policy), "usage": usage})
-        return _Completion(verdict, data.get("model", model_id),
-                           int(usage.get("input_tokens") or 0),
-                           int(usage.get("output_tokens") or 0))
+            data = _post(self.base_url, {"state": state, "model": model_id,
+                                         "questions": QUESTIONS},
+                         timeout or self._timeout)
+            if not isinstance(data, dict):
+                row["attempts"], row["http_status"] = 1, 200
+                raise RuntimeError(f"{PROVIDER_NAME}: response is a {type(data).__name__}, not "
+                                   f"an answers object; escalating")
+            transport = data.pop(_TRANSPORT_KEY, {})
+            row.update(attempts=int(transport.get("attempts") or 1),
+                       http_status=transport.get("http_status", 200),
+                       request_id=transport.get("request_id"))
+            answers = data.get("answers")
+            if not isinstance(answers, dict):
+                raise RuntimeError(f"{PROVIDER_NAME}: response carries no answers object "
+                                   f"(got {str(answers)[:80]}); escalating")
+            # An absent verdict is the one field with a safe reading — ESCALATE, the
+            # conservative direction. Everything present is validated in full.
+            verdict_answer = answers.get("verdict")
+            if verdict_answer is None:
+                verdict_answer = {}
+            if not isinstance(verdict_answer, dict):
+                raise RuntimeError(f"{PROVIDER_NAME}: verdict is not an answer object "
+                                   f"(got {str(verdict_answer)[:80]}); escalating")
+            verdict = _choice(verdict_answer, "verdict", _VERDICT_OPTIONS) or "ESCALATE"
+            raw_verdict = verdict
+            confidence = _finite(verdict_answer.get("confidence", 0.0),
+                                 "verdict.confidence")
+            _probabilities(verdict_answer, "verdict", _VERDICT_OPTIONS, picked=verdict)
+            blast = _score(answers)
+            advocating = _noul(answers, "self_advocating")
+            policy_ok = _noul(answers, "policy_allows")
+            reads_secrets = _noul(answers, "reads_secrets")
+            sends_outbound = _noul(answers, "sends_outbound")
+
+            # Policy, in code, above the model's raw pick. Order matters and is versioned by
+            # _POLICY_VERSION; this PR only names each existing branch for audit replay.
+            if advocating >= 0.6:
+                rule = "self_advocating"
+                if verdict == "DENY":
+                    reason = f"model DENY preserved; self_advocating {advocating:.2f} >= 0.6"
+                else:
+                    verdict, reason = "ESCALATE", f"self_advocating {advocating:.2f} >= 0.6"
+            elif reads_secrets >= 0.7 and sends_outbound >= 0.7:
+                rule = "secrets_exfil"
+                verdict, reason = "DENY", (f"reads_secrets {reads_secrets:.2f} + "
+                                           f"sends_outbound {sends_outbound:.2f} >= 0.7")
+            elif reads_secrets >= 0.7:
+                rule = "secrets_read"
+                if verdict == "DENY":
+                    reason = f"model DENY preserved; reads_secrets {reads_secrets:.2f} >= 0.7"
+                else:
+                    verdict, reason = "ESCALATE", f"reads_secrets {reads_secrets:.2f} >= 0.7"
+            elif policy_ok >= 0.7 and blast < 2.0 and policy:
+                rule = "policy_allow"
+                verdict, reason = "APPROVE", f"operator_policy allows ({policy_ok:.2f})"
+            elif verdict == "APPROVE" and (confidence < 0.55 or blast >= 1.6):
+                rule = "low_confidence" if confidence < 0.55 else "high_blast"
+                verdict, reason = "ESCALATE", (f"confidence {confidence:.2f} < 0.55"
+                                               if confidence < 0.55
+                                               else f"blast_radius {blast:.2f} >= 1.6")
+            else:
+                rule, reason = "model_verdict", f"model verdict (conf {confidence:.2f})"
+            if verdict not in VERDICT_CRITERIA:
+                rule = "invalid_verdict"
+                verdict, reason = "ESCALATE", "verdict not one of APPROVE/DENY/ESCALATE"
+            # A command too long to send in full was judged on a cut: never auto-approve it.
+            if truncated and verdict == "APPROVE":
+                rule = "truncated"
+                verdict, reason = "ESCALATE", "command truncated before judgement"
+
+            usage = data.get("usage", {})
+            logger.info("%s %s [%s] (conf %.2f, blast %.2f, advocating %.2f, "
+                        "policy_allows %.2f, reads_secrets %.2f, sends_outbound %.2f) for %r",
+                        PROVIDER_NAME, verdict, reason, confidence, blast, advocating, policy_ok,
+                        reads_secrets, sends_outbound, safe_command[:60])
+            row.update(ts=time.time(), ok=True, verdict=verdict, raw_verdict=raw_verdict,
+                       rule=rule, reason=reason, model=data.get("model", model_id),
+                       provider=data.get("provider") or None, confidence=confidence,
+                       blast_radius=blast, self_advocating=advocating,
+                       policy_allows=policy_ok, reads_secrets=reads_secrets,
+                       sends_outbound=sends_outbound, usage=usage,
+                       latency_ms=int((time.monotonic() - started) * 1000))
+            _record(row)
+            return _Completion(verdict, data.get("model", model_id),
+                               int(usage.get("input_tokens") or 0),
+                               int(usage.get("output_tokens") or 0))
+        except Exception as exc:
+            row.update(ts=time.time(), ok=False,
+                       latency_ms=int((time.monotonic() - started) * 1000),
+                       attempts=int(getattr(exc, "attempts", row["attempts"]) or 0),
+                       http_status=getattr(exc, "status_code", row["http_status"]),
+                       request_id=getattr(exc, "request_id", row["request_id"]),
+                       error_class=_error_class(exc), error=str(exc)[:300])
+            _record(row)
+            raise
+
+
+def _log_path() -> Path:
+    """Explicit override, then the active Hermes profile, then the default home."""
+    override = (os.environ.get("JEV_APPROVAL_LOG") or "").strip()
+    if override:
+        return Path(os.path.expanduser(override))
+    try:
+        constants = importlib.import_module("hermes_constants")
+        return Path(constants.get_hermes_home()) / _LOG_NAME
+    except Exception:
+        configured = (os.environ.get("HERMES_HOME") or "").strip()
+        home = Path(os.path.expanduser(configured)) if configured else Path.home() / ".hermes"
+        return home / _LOG_NAME
+
+
+_UNTRUSTED_CAPS = {"command": 600, "flagged_as": 500, "error": 300}
+
+
+def _sink_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Redact and bound attacker-influenced strings again at the persistence boundary."""
+    out = dict(row)
+    for key, cap in _UNTRUSTED_CAPS.items():
+        if isinstance(out.get(key), str):
+            out[key] = _redact(out[key])[:cap]
+    return out
 
 
 def _record(row: Dict[str, Any]) -> None:
-    """Append one decision as JSONL, 0600, size-capped. Never raises: logging must not
-    break a gate.
+    """Append one decision as secure JSONL. Never raises: logging must not break a gate.
 
-    ponytail: single-generation rotation at _LOG_MAX_BYTES (os.replace, so the swap is
-    atomic and a reader never sees a missing file). Two files bounded, no cron, no
-    logging.handlers config. Set JEV_APPROVAL_LOG_MAX_BYTES=0 to disable the log entirely.
+    ponytail: one O_APPEND write is enough; no lock/fsync for a diagnostic log. Rotation
+    keeps one generation. Set JEV_APPROVAL_LOG_MAX_BYTES=0 to disable it.
     """
     if _LOG_MAX_BYTES <= 0:
         return
+    path = _log_path()
     try:
-        _LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        # Rotate BEFORE appending so the live file never exceeds the cap by more than a row.
-        if _LOG_PATH.exists() and _LOG_PATH.stat().st_size >= _LOG_MAX_BYTES:
-            os.replace(_LOG_PATH, _LOG_PATH.with_suffix(_LOG_PATH.suffix + ".1"))
-        existed = _LOG_PATH.exists()
-        with _LOG_PATH.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(row, default=str) + "\n")
-        if not existed:
-            os.chmod(_LOG_PATH, 0o600)
+        encoded = (json.dumps(_sink_row(row), default=str) + "\n").encode("utf-8")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if path.stat().st_size and path.stat().st_size + len(encoded) > _LOG_MAX_BYTES:
+                os.replace(path, path.with_suffix(path.suffix + ".1"))
+        except FileNotFoundError:
+            pass
+        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags, 0o600)
+        try:
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, 0o600)
+            os.write(fd, encoded)
+        finally:
+            os.close(fd)
     except Exception as exc:  # pragma: no cover
         logger.debug("%s: could not write decision log: %s", PROVIDER_NAME, exc)
 
