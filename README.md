@@ -21,10 +21,11 @@ Hermes' `approvals.mode: smart` sends every flagged shell command to an auxiliar
 full reasoning model spun up to emit one token, which a regex then parses back out.
 
 Jev answers that shape natively — one typed `Choice`, calibrated probability, nothing to
-parse. This plugin registers it as a Hermes provider so that one task can use it, over either
-of two routes: **TypeSafe direct** ([setup](#configure-typesafe-default), two menu clicks) or
-**OpenRouter** ([setup](#configure-openrouter-optional-needs-config-by-hand), same model, same
-price, config file only).
+parse. This plugin registers it as a Hermes provider so that one task can use it. **TypeSafe
+direct** is the default ([setup](#configure-typesafe-default), two menu clicks), **OpenRouter**
+is a built-in preset ([setup](#configure-openrouter-optional-needs-config-by-hand), config file
+only), and any other Jev-compatible HTTPS endpoint works with an explicit `base_url` and
+plugin-level `key_env` ([setup](#configure-any-other-jev-compatible-provider)).
 
 ```yaml
 auxiliary:
@@ -376,7 +377,7 @@ Resolution order for a known aggregator host: its Hermes credential pool ->
 `settings.key_env` -> the aggregator's default variable (`OPENROUTER_API_KEY`). The TypeSafe
 route ignores this setting entirely.
 
-### Any other Jev-compatible provider
+## Configure — any other Jev-compatible provider
 
 No plugin release or catalog bump is needed. Configure the provider's **complete decision
 endpoint**, model id, and a plugin-level environment-variable name:
@@ -405,9 +406,10 @@ URL-credential/query rejection, and same-origin redirect enforcement still apply
 model picker falls back to the built-in Jev choices because an arbitrary endpoint has no
 standard model-catalog contract.
 
-### Which route to pick
+## Which preset route to pick
 
-Verified live on the same 5 commands, **identical verdicts on both**:
+The table below compares only the two built-in presets. Verified live on the same 5 commands,
+they produced **identical verdicts**:
 
 | | endpoint | resolved model | avg | extras |
 |---|---|---|---|---|
