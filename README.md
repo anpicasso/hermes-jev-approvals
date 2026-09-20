@@ -25,7 +25,7 @@ parse. This plugin registers it as a Hermes provider so that one task can use it
 direct** is the default ([setup](#configure-typesafe-default), two menu clicks), **OpenRouter**
 is a built-in preset ([setup](#configure-openrouter-optional-needs-config-by-hand), config file
 only), and any other Jev-compatible HTTPS endpoint works with an explicit `base_url` and
-plugin-level `key_env` ([setup](#configure-any-other-jev-compatible-provider)).
+optional plugin-level `key_env` ([setup](#configure-any-other-jev-compatible-provider)).
 
 ```yaml
 auxiliary:
@@ -159,12 +159,13 @@ because this is a third-party egress boundary, not a display surface. Best-effor
 guarantee — as every other gate that does this says too.
 
 **The endpoint is a credential boundary.** Requests require HTTPS on the default port and a
-URL without embedded credentials, query, or fragment. TypeSafe and OpenRouter have
-zero-config presets; another host is accepted only with an explicit plugin-level `key_env`,
-and uses `base_url` as its complete decision endpoint. It can therefore never implicitly
-inherit a TypeSafe/OpenRouter key. Cross-origin redirects are refused so `Authorization` cannot follow
-an open redirect. Invalid endpoints raise and Hermes escalates to a human; validation happens
-at request time so core cannot replace this provider with its generic OpenAI fallback.
+URL without embedded credentials, query, or fragment. TypeSafe and OpenRouter have built-in
+routing and credential presets; another host uses `base_url` as its complete decision endpoint
+and may use an explicit plugin-level `key_env`. Without one, the request carries no `Authorization`
+header. A custom host therefore never implicitly inherits a TypeSafe/OpenRouter key.
+Cross-origin redirects are refused so `Authorization` cannot follow an open redirect. Invalid
+endpoints raise and Hermes escalates to a human; validation happens at request time so core
+cannot replace this provider with its generic OpenAI fallback.
 
 **Typed answers are validated as contracts.** Choice confidence and probabilities must be
 finite and in range, the distribution must cover exactly the requested options and sum to
@@ -329,10 +330,18 @@ and returns the identical typed answers. It is **not** available from the `herme
 that picker prompts for a model and reasoning effort only, and its "Custom endpoint" option
 hardcodes `provider: custom`, which bypasses this plugin. So this route is config-file only.
 
-**1. Store the key once** (skip if you already use OpenRouter in Hermes):
+**1. Store the key once** (skip if you already use OpenRouter in Hermes). The normal example
+uses Hermes' credential pool:
 
 ```bash
 hermes auth add openrouter
+```
+
+Or put the preset variable directly in `~/.hermes/.env`; OpenRouter's built-in route reads it
+without extra plugin settings:
+
+```dotenv
+OPENROUTER_API_KEY=...
 ```
 
 **2. Point the task at OpenRouter** — in `config.yaml`:
@@ -358,9 +367,15 @@ auxiliary:
 >
 > `tests/test_real_load.py` asserts all three config shapes, so this cannot drift.
 
-That is all. The plugin reads the OpenRouter key from Hermes' `openrouter` credential pool,
+The plugin reads the OpenRouter key from Hermes' `openrouter` credential pool,
 and picks the endpoint from the host: `openrouter.ai` (or a real subdomain) -> `/decisions`;
 `api.typesafe.ai` -> `/systemone`. These are convenience presets, not an allowlist.
+
+Stock Hermes still checks that the selected `typesafe-jev` **provider** has its normal
+credential before constructing the plugin client, so complete the main [Install](#install)
+step (`hermes auth add typesafe-jev`) even when OpenRouter supplies the request credential.
+That TypeSafe credential is a dispatch prerequisite only on this route: the plugin never sends
+it to OpenRouter.
 
 **Only if the key is not in a Hermes credential pool**, name its variable in the plugin's own
 settings:
@@ -370,7 +385,7 @@ plugins:
   entries:
     jev-approvals:
       settings:
-        key_env: SOME_AGGREGATOR_KEY     # optional; required for a custom host
+        key_env: SOME_AGGREGATOR_KEY     # optional
 ```
 
 Resolution order for a known aggregator host: its Hermes credential pool ->
@@ -380,7 +395,8 @@ route ignores this setting entirely.
 ## Configure — any other Jev-compatible provider
 
 No plugin release or catalog bump is needed. Configure the provider's **complete decision
-endpoint**, model id, and a plugin-level environment-variable name:
+endpoint** and model id. Add a plugin-level environment-variable name only when that endpoint
+requires authentication:
 
 ```yaml
 auxiliary:
@@ -400,11 +416,70 @@ Put `MY_JEV_PROVIDER_KEY=...` in the environment or `~/.hermes/.env`. Do **not**
 `api_key` or `key_env` under `auxiliary.approval`: core would resolve the provider as
 `custom` and bypass this plugin.
 
+For an endpoint that supports anonymous access, omit the entire `plugins` block. The request
+to that endpoint has no `Authorization` header when no custom key is configured. Stock Hermes
+still requires the normal `typesafe-jev` provider credential from [Install](#install) before it
+constructs any `api_key` provider client; that credential is never forwarded to a custom host.
+
 The custom `base_url` is used exactly as written: no hidden `/systemone` or `/decisions`
 suffix is appended. Custom hosts never implicitly inherit the TypeSafe or OpenRouter credential. HTTPS,
 URL-credential/query rejection, and same-origin redirect enforcement still apply. The live
 model picker falls back to the built-in Jev choices because an arbitrary endpoint has no
 standard model-catalog contract.
+
+## Configure — OpenCode Zen
+
+OpenCode Zen exposes Jev at the same typed System One endpoint shape. These two configurations
+were verified against the live endpoint documented at
+[opencode.ai/docs/zen/#jev](https://opencode.ai/docs/zen/#jev).
+
+### Limited-time free model — anonymous OpenCode request
+
+```yaml
+auxiliary:
+  approval:
+    provider: typesafe-jev
+    model: jev-1.13-free
+    base_url: https://opencode.ai/zen/v1/systemone
+```
+
+The request to OpenCode returned HTTP 200 with valid typed answers and no `Authorization`
+header. It intentionally has no `key_env`; remove any plugin-level `key_env` left from an
+authenticated custom route before using this example. You must still complete the normal
+`hermes auth add typesafe-jev` install step because stock Hermes checks the provider credential
+before constructing its client, but that credential never leaves for OpenCode. OpenCode labels
+this model as free for a limited time. `Bearer public` also worked in the live probe, but buys
+nothing over omitting the header; an authenticated free request hit that account's free-usage
+limit (HTTP 429).
+
+### Paid model — Zen API key
+
+Put the key in `~/.hermes/.env`:
+
+```dotenv
+OPENCODE_API_KEY=...
+```
+
+Then configure the full endpoint and plugin-level key variable:
+
+```yaml
+auxiliary:
+  approval:
+    provider: typesafe-jev
+    model: jev-1.13
+    base_url: https://opencode.ai/zen/v1/systemone
+
+plugins:
+  entries:
+    jev-approvals:
+      settings:
+        key_env: OPENCODE_API_KEY
+```
+
+The authenticated paid request returned HTTP 200; the same paid model returned HTTP 401 with
+no key or `Bearer public`. As with every custom route, the endpoint and model stay in config —
+adding OpenCode required no provider allowlist entry and will not require a catalog bump when
+another compatible host appears.
 
 ## Which preset route to pick
 
@@ -451,9 +526,11 @@ To roll back, unset the config keys. Hermes falls back to its normal auxiliary r
 ## Requirements
 
 - Hermes Agent with plugin support and `approvals.mode: smart`
-- A TypeSafe API key ([console.typesafe.ai](https://console.typesafe.ai/settings/keys)),
-  stored via `hermes auth add typesafe-jev` — or, for the OpenRouter route, an OpenRouter key
-  via `hermes auth add openrouter`
+- A TypeSafe provider credential stored via `hermes auth add typesafe-jev`; stock Hermes
+  requires it before constructing this `api_key` provider. TypeSafe direct uses it upstream.
+  OpenRouter additionally needs `hermes auth add openrouter`; an authenticated custom host
+  needs its configured `key_env`. An anonymous custom request, including OpenCode's current
+  `jev-1.13-free` route, receives none of those credentials.
 - Python 3.10+, **no third-party dependencies** (stdlib `urllib`)
 
 ## Limitations

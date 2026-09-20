@@ -79,7 +79,7 @@ _OPENROUTER_HOST = "openrouter.ai"
 # host -> (hermes provider whose credential pool holds the key, default key env var).
 # Only aggregators that front Jev; the TypeSafe host is not here (it uses TYPESAFE_API_KEY).
 # Known aggregators get pool-aware convenience defaults. Unknown providers use their full
-# configured endpoint and explicit settings.key_env instead of growing this table.
+# configured endpoint and optional settings.key_env instead of growing this table.
 _AGGREGATORS = {_OPENROUTER_HOST: ("openrouter", "OPENROUTER_API_KEY")}
 _ROUTES = {
     _OPENROUTER_HOST: ("/decisions",
@@ -279,9 +279,9 @@ def _host_matches(host: str, known: str) -> bool:
 def _route_for(base_url: str) -> Tuple[str, str, str]:
     """(decision endpoint, models URL, models JSON key) for a base_url's host.
 
-    Known hosts keep their zero-config presets. For any other host, base_url is the full
-    decision endpoint and the empty route means "do not append anything". That keeps new
-    Jev-compatible providers configurable without a plugin or catalog release.
+    Known hosts keep their built-in routing and credential presets. For any other host,
+    base_url is the full decision endpoint; the empty route means "do not append anything".
+    That keeps new Jev-compatible providers configurable without a plugin or catalog release.
     """
     host = (urllib.parse.urlparse(base_url or DEFAULT_BASE_URL).hostname or "").lower()
     for known, route in _ROUTES.items():
@@ -298,12 +298,13 @@ def _api_key(base_url: str = "") -> str:
     os.environ ignores it — the plugin appeared to require a manual `export`, which was a
     bug, not a design.
 
-    A non-TypeSafe host has its own key; it must never implicitly inherit the TypeSafe one. The key
-    cannot come from `auxiliary.approval.api_key`/`key_env`: a key set
+    A non-TypeSafe host has its own optional key; it must never implicitly inherit the TypeSafe
+    one. The key cannot come from `auxiliary.approval.api_key`/`key_env`: a key set
     beside `base_url` in task config collapses the provider to "custom"
     (auxiliary_client.py, `if cfg_base_url and cfg_api_key`) and this plugin is bypassed.
-    Known aggregators first use their Hermes pool; every custom endpoint uses only the
-    environment variable explicitly named by plugin-level `settings.key_env`.
+    Known aggregators first use their Hermes pool. A custom endpoint uses only the environment
+    variable explicitly named by plugin-level `settings.key_env`, or no Authorization header
+    when that setting/value is empty and the endpoint supports anonymous access.
     """
     host = (urllib.parse.urlparse(base_url or "").hostname or "").lower()
     aggregator = _aggregator_for(host)
@@ -324,11 +325,7 @@ def _api_key(base_url: str = "") -> str:
     if host and not _host_matches(host, _TYPESAFE_HOST):
         env_var = str(_setting("key_env", "") or "").strip()
         key = (os.environ.get(env_var) or "").strip() if env_var else ""
-        if key:
-            return key
-        raise RuntimeError(
-            f"No credential found for the custom Jev endpoint at {host}. Set its key in "
-            f"the environment variable named by `plugins.entries.{PLUGIN_ID}.settings.key_env`.")
+        return key
     for resolve in (lambda: _key_from_runtime_provider(PROVIDER_NAME), _key_from_dotenv):
         try:
             key = resolve()
@@ -374,11 +371,11 @@ def _origin(url: str) -> Tuple[str, str, int]:
 
 
 def _validated_base_url(base_url: str) -> str:
-    """The base_url this provider may send the API key to, or a RuntimeError.
+    """The HTTPS base_url this provider may call, or a RuntimeError.
 
     The endpoint is a credential boundary, not a preference: `_post` derives the
-    destination from this string and attaches an Authorization bearer token, so anything
-    accepted here is somewhere the key goes. Rejections raise, and core escalates any
+    destination from this string and may attach an Authorization bearer token, so anything
+    accepted here is somewhere an explicitly configured key can go. Rejections raise, and core escalates any
     exception from this provider to a human — the right outcome for a misconfiguration,
     and never a silent fallback to a default host. Messages name the host and the reason
     only: a rejected URL can itself carry a credential, and must not be echoed anywhere.
@@ -408,15 +405,6 @@ def _validated_base_url(base_url: str) -> str:
     if port not in (None, 443):
         raise RuntimeError(f"{PROVIDER_NAME}: base_url host {host} is on port {port}; only "
                            f"the default https port is accepted. Escalating to a human.")
-    known = _host_matches(host, _TYPESAFE_HOST) or any(
-        _host_matches(host, aggregator) for aggregator in _AGGREGATORS)
-    if not known:
-        env_var = str(_setting("key_env", "") or "").strip()
-        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", env_var):
-            raise RuntimeError(
-                f"{PROVIDER_NAME}: custom Jev endpoint {host or '<no host>'} requires a valid "
-                f"`plugins.entries.{PLUGIN_ID}.settings.key_env`; refusing to implicitly "
-                "reuse a TypeSafe or aggregator credential. Escalating to a human.")
     return raw
 
 
@@ -511,9 +499,14 @@ def _post(base_url: str, body: Dict[str, Any], timeout: float) -> Dict[str, Any]
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
-        req = urllib.request.Request(
-            url, data=data,
-            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "User-Agent": "hermes-jev-approvals/0.3",
+        }
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        req = urllib.request.Request(url, data=data, headers=headers)
         try:
             with _urlopen(req, min(timeout, remaining)) as resp:
                 payload = json.load(resp)
@@ -1045,8 +1038,9 @@ def fetch_decision_models(base_url: str = "", api_key: str = "") -> List[str]:
     `?providers=TypeSafe` is accepted but matches nothing. Without it we would pull all 447
     models to find two.
 
-    `api_key` is the caller's credential when it has one (the model picker passes the one it
-    resolved); otherwise the route's own resolution runs.
+    The caller's `api_key` is intentionally not forwarded: it is the credential core used to
+    instantiate this provider, which may belong to TypeSafe even when `base_url` points at a
+    different host. Each route resolves only its own credential through `_api_key`.
     """
     try:
         _validated_base_url(base_url)   # the models URL is fixed, the route it implies is not
@@ -1062,7 +1056,7 @@ def fetch_decision_models(base_url: str = "", api_key: str = "") -> List[str]:
         # TypeSafe's /v1/models needs auth; OpenRouter's public list does not.
         if key != "data":
             req.add_header("Authorization",
-                           f"Bearer {str(api_key).strip() or _api_key(base_url)}")
+                           f"Bearer {_api_key(base_url)}")
         with urllib.request.urlopen(req, timeout=10) as resp:
             payload = json.load(resp)
         ids = [str(m.get(field) or "") for m in (payload.get(key) or []) if isinstance(m, dict)]

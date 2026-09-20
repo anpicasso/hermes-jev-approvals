@@ -90,11 +90,19 @@ for label, base_url, model in (
     print(f"{label:<16} -> JevClient  model={final_model!r}  "
           f"route_default={client._default_model()!r}")
 
+# 3a. Do not invent a fake credential to bypass core's api_key-provider dispatch guard.
+# Such an env var is also considered by main-provider auto-detection and can silently select
+# this approvals-only provider for chat. Custom endpoint requests may be anonymous, but the
+# stock core still requires the normal typesafe-jev credential before it constructs the client.
+assert tuple(profile.env_vars) == ("TYPESAFE_API_KEY",), profile.env_vars
+print("dispatch contract: only the real provider credential is registered")
+
 # 3b. THE DOCUMENTED CONFIG SHAPES. A key alongside base_url in auxiliary.<task> config
 # collapses the provider to "custom" (auxiliary_client.py: `if cfg_base_url and
 # cfg_api_key`), which bypasses this plugin entirely — so OpenRouter and arbitrary Jev
 # endpoints must carry base_url and NO task-level api_key/key_env. The plugin resolves the
-# key from the OpenRouter pool or its own plugin-level settings.key_env. This asserts the
+# key from the OpenRouter pool or optional plugin-level settings.key_env; without one the
+# custom endpoint request itself is anonymous. This asserts the
 # README stays true.
 import agent.auxiliary_client as _aux  # noqa: E402
 from agent.auxiliary_client import _resolve_task_provider_model  # noqa: E402
@@ -141,7 +149,17 @@ print(f"picker: provider_model_ids -> {ids}")
 
 from hermes_cli.inventory import build_aux_picker_rows  # noqa: E402
 
-rows = build_aux_picker_rows(current_provider="auto", current_model="", current_base_url="")
+# Keep this test independent of the caller's real credential store. The value is used only by
+# core's inventory gate; profile.fetch_models above already exercised the live/fallback list.
+_old_typesafe_key = os.environ.get("TYPESAFE_API_KEY")
+try:
+    os.environ["TYPESAFE_API_KEY"] = "test-key-not-used"
+    rows = build_aux_picker_rows(current_provider="auto", current_model="", current_base_url="")
+finally:
+    if _old_typesafe_key is None:
+        os.environ.pop("TYPESAFE_API_KEY", None)
+    else:
+        os.environ["TYPESAFE_API_KEY"] = _old_typesafe_key
 ours = [r for r in rows if str(r.get("slug", "")) == PROVIDER]
 assert ours, f"{PROVIDER} is absent from the auxiliary picker rows"
 assert ours[0].get("models"), f"{PROVIDER} appears in the picker with an EMPTY model list"
@@ -172,19 +190,17 @@ assert mod._route_for("https://example.com/v1/systemone")[0] == ""
 assert mod._aggregator_for("notopenrouter.ai") is None
 assert mod._aggregator_for("api.openrouter.ai") == ("openrouter", "OPENROUTER_API_KEY")
 _real_setting = mod._setting
-mod._setting = lambda key, default=None: default
 try:
-    mod._validated_base_url("https://notopenrouter.ai/api/alpha")
-    raise AssertionError("lookalike host passed the credential boundary")
-except RuntimeError:
-    pass
+    mod._setting = lambda key, default=None: default
+    assert mod._validated_base_url("https://notopenrouter.ai/api/alpha") == \
+           "https://notopenrouter.ai/api/alpha"
 finally:
     mod._setting = _real_setting
 # the OpenRouter model list must carry the filter, or it pulls the whole 447-model catalogue
 assert "output_modalities=decisions" in mod._route_for("https://openrouter.ai/api/alpha")[1]
 print("route_for: presets match exactly; custom endpoints append no hidden route")
 
-# 5. `settings.key_env`: pool-first convenience for presets, explicit trust for custom hosts
+# 5. `settings.key_env`: pool-first convenience for presets, optional auth for custom hosts
 _real_setting = mod._setting
 _real_pool = mod._key_from_runtime_provider
 _real_dotenv = mod._key_from_dotenv
@@ -200,7 +216,7 @@ try:
     os.environ["MY_AGG_KEY"] = "fake-provider-key"
     assert mod._api_key("https://openrouter.ai/api/alpha") == "fake-provider-key"
 
-    # The same explicit setting authorizes a custom host and supplies only that host's key.
+    # The same explicit setting supplies only the custom host's key.
     custom = "https://jev.example/v1/systemone"
     assert mod._validated_base_url(custom) == custom
     assert mod._route_for(custom) == ("", "", "")
@@ -218,17 +234,14 @@ try:
     assert mod._api_key("") == "fake-typesafe-key"
     assert mod._api_key("https://api.typesafe.ai/v1") == "fake-typesafe-key"
 
-    # a garbage setting must not break the default route or authorize a custom host
+    # A garbage setting must not break the default route; custom routes simply stay anonymous.
     mod._setting = lambda key, default=None: 12345 if key == "key_env" else default
     try:
         mod._api_key("https://openrouter.ai/api/alpha")
     except RuntimeError:
         pass  # no credential is the correct outcome, not a crash
-    try:
-        mod._validated_base_url(custom)
-        raise AssertionError("a garbage key_env authorized a custom endpoint")
-    except RuntimeError:
-        pass
+    assert mod._validated_base_url(custom) == custom
+    assert mod._api_key(custom) == ""
     assert mod._api_key("") == "fake-typesafe-key", "a bad setting leaked into TypeSafe"
 finally:
     mod._setting = _real_setting
@@ -236,7 +249,7 @@ finally:
     mod._key_from_dotenv = _real_dotenv
     for _v in ("MY_AGG_KEY", "OPENROUTER_API_KEY", "TYPESAFE_API_KEY"):
         os.environ.pop(_v, None)
-print("settings.key_env: preset fallback + explicit custom-host trust, no key crossover")
+print("settings.key_env: preset fallback + optional custom auth, no key crossover")
 
 # 6. urllib-based provider errors must carry the same status metadata SDK errors do,
 # or core's auxiliary recovery ladder cannot classify them after our bounded retries.
