@@ -166,13 +166,13 @@ jev._api_key = lambda base_url="": "test-key"
 
 for codes, label in ([429], "429"), ([503], "503"), (["net"], "network error"):
     opener, state = failing_urlopen(codes)
-    jev.urllib.request.urlopen = opener
+    jev._urlopen = opener
     out = _REAL_POST("https://api.typesafe.ai/v1", {"state": {}}, 30.0)
     assert out["model"] == "jev-1.13.0", out
     assert state["n"] == 2, f"{label} did not retry (attempts={state['n']})"
 
 opener, state = failing_urlopen([401])
-jev.urllib.request.urlopen = opener
+jev._urlopen = opener
 try:
     _REAL_POST("https://api.typesafe.ai/v1", {"state": {}}, 30.0)
     raise AssertionError("401 should not be retried, and should raise")
@@ -182,7 +182,7 @@ except RuntimeError as exc:
 assert state["n"] == 1, f"401 was retried {state['n']} times"
 
 opener, state = failing_urlopen([429, 429, 429])
-jev.urllib.request.urlopen = opener
+jev._urlopen = opener
 try:
     _REAL_POST("https://api.typesafe.ai/v1", {"state": {}}, 30.0)
     raise AssertionError("exhausted retries must raise so core escalates")
@@ -230,8 +230,8 @@ _LOG.unlink(missing_ok=True)
 for _ in range(12):
     verdict_for("git commit -m x", description="git operation")
 assert rotated.exists(), "log never rotated: it would grow without bound"
-assert _LOG.stat().st_size < jev._LOG_MAX_BYTES, _LOG.stat().st_size
-assert rotated.stat().st_size >= jev._LOG_MAX_BYTES, rotated.stat().st_size
+assert _LOG.stat().st_size <= jev._LOG_MAX_BYTES, _LOG.stat().st_size
+assert 0 < rotated.stat().st_size <= jev._LOG_MAX_BYTES, rotated.stat().st_size
 # both generations stay valid JSONL, so a re-score pass can read them
 for path in (_LOG, rotated):
     for line in path.read_text().splitlines():

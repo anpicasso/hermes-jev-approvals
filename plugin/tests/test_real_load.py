@@ -162,10 +162,19 @@ assert mod._route_for("")[0] == "/systemone"
 assert mod._route_for("https://api.typesafe.ai/v1")[0] == "/systemone"
 assert mod._route_for("https://openrouter.ai/api/alpha")[0] == "/decisions"
 assert mod._route_for("https://OPENROUTER.AI/api/alpha")[0] == "/decisions"
+assert mod._route_for("https://api.openrouter.ai/v1")[0] == "/decisions"
+assert mod._route_for("https://notopenrouter.ai/api/alpha")[0] == "/systemone"
 assert mod._route_for("https://example.com/v1")[0] == "/systemone"
+assert mod._aggregator_for("notopenrouter.ai") is None
+assert mod._aggregator_for("api.openrouter.ai") == ("openrouter", "OPENROUTER_API_KEY")
+try:
+    mod._validated_base_url("https://notopenrouter.ai/api/alpha")
+    raise AssertionError("lookalike host passed the credential boundary")
+except RuntimeError:
+    pass
 # the OpenRouter model list must carry the filter, or it pulls the whole 447-model catalogue
 assert "output_modalities=decisions" in mod._route_for("https://openrouter.ai/api/alpha")[1]
-print("route_for: typesafe -> /systemone, openrouter -> /decisions, unknown -> /systemone")
+print("route_for: exact/subdomain hosts only; unknown endpoints are refused before egress")
 
 # 5. the optional `settings.key_env`: aggregator routes only, pool wins, bad values are inert
 _real_setting = mod._setting

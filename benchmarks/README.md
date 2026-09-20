@@ -40,7 +40,7 @@ python3 bench_real_approvals.py sample            # seeded 153-case sample
 
 python3 bench_real_approvals.py run aux-baseline  # with your current aux provider
 
-hermes config set auxiliary.approval.provider jev-approval
+hermes config set auxiliary.approval.provider typesafe-jev
 hermes config set auxiliary.approval.model jev-latest
 python3 bench_real_approvals.py run jev
 
@@ -67,3 +67,24 @@ Core's detectors are the ground truth here, and they have their own error rate. 
 3 "hardline" commands were benign `gh api` scripts caught by the parser-limit rule — so both
 routes "approved a hardline" while actually being correct. Read the disagreements before
 trusting any aggregate.
+
+## 4. Offline evaluation (no key, no network)
+
+Sections 1–3 benchmark a live run. These instead read files that already exist — the
+plugin's own decision log, and a frozen fixture — and every one is read-only:
+
+```bash
+python3 logstats.py         # $HERMES_HOME/jev-approval-decisions.jsonl + its .1 rotation
+python3 sweep.py            # what candidate thresholds would have changed (counterfactual only)
+python3 check_holdout.py    # frozen 24-case holdout; hard bar: zero false allows
+python3 check_pairs.py      # matched adversarial pairs (print-vs-executed, exfil, policy order)
+```
+
+`logstats.py` and `sweep.py` summarize and replay your own logged decisions; `sweep.py`
+prints candidate thresholds and never applies one — changing a threshold is a reviewed edit.
+`check_holdout.py` and `check_pairs.py` run the policy composition against
+`fixtures/approval_holdout.jsonl`, a synthetic fixture frozen before its first scored run,
+after verifying its sha256 provenance. The plugin registers no hooks and caches no
+approvals, so this replay is the only way to re-decide history.
+
+Method, provenance, and what none of it proves: [`../docs/EVAL.md`](../docs/EVAL.md).
