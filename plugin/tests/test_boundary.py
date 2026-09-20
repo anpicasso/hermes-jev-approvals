@@ -5,7 +5,7 @@ Offline except for three loopback sockets in check 3: no credentials, no third p
 Every case here is a shape that leaked (or an ordinary command that would have been
 mangled) before the fix, so each assert is a regression test:
 
-  1. endpoint validation — https only, known hosts only, nothing else in the URL
+  1. endpoint validation — https only; custom hosts allow optional key_env authentication
   2. host matching — an exact host or a real subdomain, never a raw suffix
   3. redirects — `Authorization` does not follow a cross-origin redirect
   4. redaction — URL/query credentials, `Cookie:`, `curl -u`, and the commands that
@@ -14,6 +14,7 @@ mangled) before the fix, so each assert is a regression test:
 """
 import http.server
 import importlib.util
+import io
 import json
 import os
 import pathlib
@@ -32,13 +33,16 @@ spec.loader.exec_module(jev)
 PROVIDER = "typesafe-jev"
 _real_key, _real_open = jev._api_key, jev._urlopen
 _stubs = (jev._key_from_runtime_provider, jev._key_from_dotenv, jev._setting, jev._core_redact)
+# Do not let this machine's plugin settings decide the negative test cases.
+jev._setting = lambda key, default=None: default
 
 
 # --- 1. the endpoint is a credential boundary ----------------------------------------
 ACCEPTED = ("", "  https://api.typesafe.ai/v1  ", "https://api.typesafe.ai",
             "https://openrouter.ai/api/alpha", "https://OPENROUTER.AI/api/alpha",
             "https://api.openrouter.ai/v1", "https://openrouter.ai:443/api/alpha",
-            "https://openrouter.ai/api/alpha/")
+            "https://openrouter.ai/api/alpha/", "https://notopenrouter.ai/api/alpha",
+            "https://openrouter.ai.evil.example/api/alpha", "https://example.com/v1/systemone")
 for candidate in ACCEPTED:
     assert jev._validated_base_url(candidate) == (candidate or jev.DEFAULT_BASE_URL).strip(), candidate
 
@@ -47,9 +51,7 @@ REFUSED = {
     "openrouter.ai/api/alpha": "https",                        # no scheme at all
     "ftp://openrouter.ai/x": "https",
     "//openrouter.ai/api/alpha": "https",
-    "https://notopenrouter.ai/api/alpha": "unvetted host",     # a suffix, not a subdomain
-    "https://openrouter.ai.evil.example/api/alpha": "unvetted host",
-    "https://example.com/v1": "unvetted host",
+
     "https://user:hunter2@openrouter.ai/api/alpha": "URL credentials",
     "https://openrouter.ai/api/alpha?api_key=AKIAdeadbeef": "query string",
     "https://openrouter.ai/api/alpha#frag": "fragment",
@@ -79,7 +81,7 @@ def _no_socket(req, timeout=None):
 
 try:
     jev._api_key, jev._urlopen = _no_key, _no_socket
-    for candidate in ("http://evil.example/systemone", "https://notopenrouter.ai/decisions"):
+    for candidate in ("http://evil.example/systemone", "https:///decisions"):
         try:
             jev._post(candidate, {"state": {}}, 5.0)
             raise AssertionError(f"_post accepted {candidate!r}")
@@ -90,7 +92,55 @@ finally:
 
 assert jev.fetch_decision_models("http://evil.example") == []
 assert jev.fetch_decision_models("https://notopenrouter.ai/api/alpha") == []
-print("1. https + known host only, refused before any key or socket         ok")
+
+# A custom HTTPS endpoint may be anonymous or use an explicit plugin-level key_env.
+_setting_before_custom = jev._setting
+_open_before_custom = jev._urlopen
+try:
+    jev._setting = lambda key, default=None: "NEW_JEV_KEY" if key == "key_env" else default
+    for hostless in ("https:", "https://", "https:///systemone"):
+        try:
+            jev._validated_base_url(hostless)
+            raise AssertionError(f"host-less endpoint {hostless!r} was accepted")
+        except RuntimeError as exc:
+            assert "host" in str(exc), (hostless, exc)
+    custom = "https://jev.example/v1/systemone"
+    assert jev._validated_base_url(custom) == custom
+    assert jev._route_for(custom) == ("", "", "")
+    assert jev.fetch_decision_models(custom) == []
+    requests = []
+
+    def _custom_open(req, timeout=None):
+        requests.append(
+            (
+                req.full_url,
+                req.get_header("Authorization"),
+                req.get_header("Accept"),
+                req.get_header("User-agent"),
+            )
+        )
+        response = io.BytesIO(b"{}")
+        response.status, response.headers = 200, {}
+        return response
+
+    jev._urlopen = _custom_open
+    jev._setting = lambda key, default=None: default
+    assert jev._api_key(custom) == ""
+    assert isinstance(jev._post(custom, {"state": {}}, 5.0), dict)
+    assert requests == [(custom, None, "application/json", "hermes-jev-approvals/0.3")], requests
+
+    requests.clear()
+    jev._setting = lambda key, default=None: "NEW_JEV_KEY" if key == "key_env" else default
+    os.environ["NEW_JEV_KEY"] = "fake-custom-key"
+    assert isinstance(jev._post(custom, {"state": {}}, 5.0), dict)
+    assert requests == [
+        (custom, "Bearer fake-custom-key", "application/json", "hermes-jev-approvals/0.3")
+    ], requests
+finally:
+    jev._setting = _setting_before_custom
+    jev._urlopen = _open_before_custom
+    os.environ.pop("NEW_JEV_KEY", None)
+print("1. https boundary; custom hosts support anonymous or explicit-key use ok")
 
 # --- 2. exact host or a real subdomain, never a raw suffix ----------------------------
 for host, expected in (("openrouter.ai", True), ("api.openrouter.ai", True),
@@ -99,9 +149,8 @@ for host, expected in (("openrouter.ai", True), ("api.openrouter.ai", True),
                        ("openrouter.ai.evil.example", False), ("", False)):
     assert jev._host_matches(host, "openrouter.ai") is expected, host
 
-# A lookalike must not reach the decisions route, and must not be offered the aggregator's
-# credential pool; the TypeSafe route still resolves its own key, which is the point.
-assert jev._route_for("https://notopenrouter.ai/api/alpha")[0] == "/systemone"
+# A lookalike must not reach the decisions route or inherit the aggregator's credential.
+assert jev._route_for("https://notopenrouter.ai/api/alpha")[0] == ""
 assert jev._route_for("https://openrouter.ai/api/alpha")[0] == "/decisions"
 assert jev._aggregator_for("notopenrouter.ai") is None
 assert jev._aggregator_for("xopenrouter.ai") is None
@@ -113,19 +162,26 @@ try:
     jev._key_from_dotenv = lambda: ""
     jev._setting = lambda key, default=None: default
     os.environ["TYPESAFE_API_KEY"] = "fake-typesafe-key"
-    assert jev._api_key("https://notopenrouter.ai/api/alpha") == "fake-typesafe-key"
-    assert asked == [PROVIDER], asked       # never the openrouter pool
+    assert jev._api_key("https://notopenrouter.ai/api/alpha") == ""
+    assert asked == [], asked               # never the OpenRouter or TypeSafe pool
+    os.environ["NEW_JEV_KEY"] = "fake-custom-key"
+    jev._setting = lambda key, default=None: "NEW_JEV_KEY" if key == "key_env" else default
+    assert jev._api_key("https://notopenrouter.ai/api/alpha") == "fake-custom-key"
     # A real aggregator host with no aggregator credential stored raises rather than
     # falling back to TypeSafe's key: the two credentials are not interchangeable.
+    jev._setting = lambda key, default=None: default
     try:
         jev._api_key("https://openrouter.ai/api/alpha")
         raise AssertionError("the openrouter route fell back to the TypeSafe key")
     except RuntimeError as exc:
         assert "openrouter" in str(exc), exc
+
 finally:
-    jev._key_from_runtime_provider, jev._key_from_dotenv, jev._setting = _stubs[:3]
+    jev._key_from_runtime_provider, jev._key_from_dotenv = _stubs[:2]
+    jev._setting = lambda key, default=None: default
     os.environ.pop("TYPESAFE_API_KEY", None)
-print("2. exact/subdomain matching; lookalikes get no route and no key       ok")
+    os.environ.pop("NEW_JEV_KEY", None)
+print("2. exact matching; custom hosts use only their configured key         ok")
 
 # --- 3. a cross-origin redirect must not carry the credential -------------------------
 sink_hits, redirector_hits = [], []
