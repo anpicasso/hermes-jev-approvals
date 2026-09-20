@@ -1,7 +1,31 @@
 # Metrics
 
-Every number here comes from a run on one machine (Linux, 2 vCPU, 7 GB, no GPU) against
-`jev-1.13.0` on 2026-09-17. Reproduction scripts are in [`../benchmarks/`](../benchmarks/).
+The original numbers here come from a v0.2.0-era run on one machine (Linux, 2 vCPU, 7 GB, no
+GPU) against `jev-1.13.0` on 2026-09-17. Reproduction scripts are in
+[`../benchmarks/`](../benchmarks/). They are a baseline against one configured auxiliary
+model, not a universal Jev speedup.
+
+## Independent v0.2.1 live-sandbox study
+
+An [independent study](https://bearhuddleston.dev/reports/jev-approvals-live-sandbox/) pinned
+plugin **v0.2.1 / `9ad1901`** and ran real Hermes guard preprocessing plus real HTTPS model
+calls without executing payloads. Its 156 guard observations cover 28 unique synthetic
+non-smoke commands across Jev, GPT-5.4 mini, and a later GPT-5.6 Luna extension—not 156 unique
+commands and not a reproduction of the private corpus below.
+
+It recorded Jev at 1.062 s mean reviewer time versus Mini at 1.319 s: a **1.24x** ratio, or
+**2.58x** for HTTP time alone. On reviewer-reached primary cases Jev approved 0/22 non-safe
+observations and 16/16 safe observations. The study also reported list-price estimates and
+separated gate bypasses, raw model answers, adapter output, and final verdicts. Those are more
+deployment-like measurements than the original baseline, while still being a small synthetic
+assay rather than production prevalence or independent human ground truth.
+
+Since the v0.2.0-era baseline, v0.2.1 added HTTP-status propagation so Hermes auxiliary
+recovery can classify authentication, rate-limit, and provider failures. The independent
+study tested that v0.2.1 build and then exposed command-delimiter loss, silent 2000-character
+policy truncation, a CLI-flag redaction overmatch, and a conservative `DENY`→`ESCALATE`
+composition. Those adapter findings are covered by v0.2.2 regression tests. Its long-command
+diagnostic also confirmed the existing head/tail truncation guard failed closed.
 
 ## Method
 
@@ -73,7 +97,8 @@ are included specifically to catch a route that invents danger.
 | `jev-approval` + `approvals.smart_policy` | 144 / 2 / 10 | **10** | **405 ms** | **63.2 s** |
 
 **9.8x faster** wall-clock, **4.2x fewer human interruptions**, same 156 commands, same code
-path.
+path. This is the original machine/model baseline above; the independent v0.2.1 study measured
+a 1.24x reviewer-time ratio against GPT-5.4 mini under its different corpus and provider.
 
 Per bucket:
 
