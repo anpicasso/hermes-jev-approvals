@@ -226,6 +226,14 @@ sends the redacted command plus operator policy to the configured third-party en
 
 ## Verify
 
+Offline suite, from a source checkout:
+
+```bash
+python3 -m pytest plugin/tests -q
+```
+
+Installed-plugin checks:
+
 ```bash
 hermes plugins doctor ~/.hermes/plugins/jev-approvals --ci
 cd ~/.hermes/plugins/jev-approvals
