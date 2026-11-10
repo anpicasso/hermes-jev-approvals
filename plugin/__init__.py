@@ -443,12 +443,16 @@ class _SameOriginRedirects(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-_OPENER = urllib.request.build_opener(_SameOriginRedirects())
-
-
 def _urlopen(req: urllib.request.Request, timeout: float):
-    """The provider's one network seam: stdlib, cross-origin redirects refused."""
-    return _OPENER.open(req, timeout=timeout)
+    """The provider's one network seam: stdlib, cross-origin redirects refused.
+
+    The opener is built per call, not at import: build_opener()'s ProxyHandler snapshots the
+    *_PROXY environment when it is constructed. Hermes discovers plugins before it loads
+    ~/.hermes/.env, so a module-level opener silently ignores an HTTPS_PROXY set there and
+    goes direct, e.g. sending a credential-injecting proxy's placeholder key to the provider
+    (HTTP 401) on every freshly started backend.
+    """
+    return urllib.request.build_opener(_SameOriginRedirects()).open(req, timeout=timeout)
 
 
 _TRANSPORT_KEY = "_jev_transport"

@@ -15,6 +15,7 @@ OFFLINE = (
     "test_boundary.py",
     "test_hardening.py",
     "test_policy_contract.py",
+    "test_proxy_env.py",
 )
 INTEGRATION = {
     "test_real_load.py": "requires Hermes core and an installed plugin",
