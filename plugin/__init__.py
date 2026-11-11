@@ -1061,7 +1061,10 @@ def fetch_decision_models(base_url: str = "", api_key: str = "") -> List[str]:
         if key != "data":
             req.add_header("Authorization",
                            f"Bearer {_api_key(base_url)}")
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        # _urlopen, not urllib.request.urlopen: the stdlib global opener snapshots the proxy
+        # environment on first use (possibly before .env is loaded) and would also let a
+        # cross-origin redirect carry the TypeSafe Authorization header.
+        with _urlopen(req, 10) as resp:
             payload = json.load(resp)
         ids = [str(m.get(field) or "") for m in (payload.get(key) or []) if isinstance(m, dict)]
         return [i for i in ids if i]

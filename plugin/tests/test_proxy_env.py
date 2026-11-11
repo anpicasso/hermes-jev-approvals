@@ -53,4 +53,32 @@ except Exception:
 assert seen and seen[0].startswith("CONNECT openrouter.ai:443"), (
     f"request bypassed an HTTPS_PROXY set after import (proxy saw {seen!r})")
 print("1. HTTPS_PROXY set after import is honoured                           ok")
-print("\nall 1 proxy-env checks pass")
+
+# 4. the model-list path (provider discovery) must use the same per-call opener, not the
+#    stdlib global one, which also snapshots the proxy environment on first use.
+for name in ("HTTPS_PROXY", "https_proxy"):
+    os.environ.pop(name, None)
+try:
+    urllib.request.urlopen("https://127.0.0.1:9/", timeout=1)  # installs the global opener, no proxy
+except Exception:
+    pass
+seen.clear()
+server2 = socket.socket()
+server2.bind(("127.0.0.1", 0))
+server2.listen(1)
+
+
+def serve2():
+    conn, _ = server2.accept()
+    with conn:
+        seen.append(conn.recv(4096).split(b"\r\n", 1)[0].decode())
+        conn.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+
+
+threading.Thread(target=serve2, daemon=True).start()
+os.environ["HTTPS_PROXY"] = f"http://127.0.0.1:{server2.getsockname()[1]}"
+assert jev.fetch_decision_models("https://openrouter.ai/api/alpha") == []  # never raises
+assert seen and seen[0].startswith("CONNECT openrouter.ai:443"), (
+    f"model list bypassed an HTTPS_PROXY set after import (proxy saw {seen!r})")
+print("2. model-list fetch honours HTTPS_PROXY set after import             ok")
+print("\nall 2 proxy-env checks pass")
