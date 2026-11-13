@@ -13,12 +13,12 @@ requires_env:
 python_dependencies: []
 # Optional. This setting authenticates a custom base_url and is the fallback for a known
 # aggregator whose key Hermes does not already hold in a provider pool. Without it, custom
-# endpoint requests are anonymous and receive no Authorization header. Stock Hermes still
-# requires this api_key provider to have its normal TYPESAFE_API_KEY dispatch credential
-# before it constructs the client; that credential is never forwarded to a custom host.
-# `auxiliary.approval.api_key`/`key_env` cannot be used: a key beside `base_url` in task
-# config collapses the provider to "custom" and bypasses this plugin. Leave unset for
-# TypeSafe direct, and for OpenRouter when `hermes auth add openrouter` has been run.
+# endpoint requests are anonymous and receive no Authorization header. A custom or aggregator
+# route supplies Hermes a plugin-owned dispatch placeholder (never sent upstream), so
+# TYPESAFE_API_KEY is only required for TypeSafe direct. `auxiliary.approval.api_key`/`key_env`
+# cannot be used: a key beside `base_url` in task config collapses the provider to "custom" and
+# bypasses this plugin. Leave unset for TypeSafe direct, and for OpenRouter when
+# `hermes auth add openrouter` has been run.
 config_schema:
   key_env:
     type: string

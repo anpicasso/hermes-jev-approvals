@@ -17,4 +17,5 @@ collect_ignore = [
     "test_provider.py",
     "test_real_load.py",
     "test_routes.py",
+    "test_dispatch_auth.py",
 ]

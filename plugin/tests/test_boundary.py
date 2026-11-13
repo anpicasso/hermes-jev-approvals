@@ -51,6 +51,10 @@ REFUSED = {
     "openrouter.ai/api/alpha": "https",                        # no scheme at all
     "ftp://openrouter.ai/x": "https",
     "//openrouter.ai/api/alpha": "https",
+    # Loopback is still a network leg for the credential boundary; documented limitation.
+    "http://127.0.0.1:20128/v1/systemone": "https",
+    "http://localhost:20128/v1/systemone": "https",
+    "https://localhost:20128/v1/systemone": "port",
 
     "https://user:hunter2@openrouter.ai/api/alpha": "URL credentials",
     "https://openrouter.ai/api/alpha?api_key=AKIAdeadbeef": "query string",

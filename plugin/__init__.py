@@ -1125,6 +1125,17 @@ def fetch_decision_models(base_url: str = "", api_key: str = "") -> List[str]:
         return []
 
 
+def _configured_approval_base_url() -> str:
+    """`auxiliary.approval.base_url` from the host config, or "" when unset."""
+    try:
+        from hermes_cli.config import load_config_readonly
+        config = load_config_readonly() or {}
+        approval = ((config.get("auxiliary") or {}).get("approval") or {})
+        return str(approval.get("base_url") or "").strip()
+    except Exception:
+        return ""
+
+
 def _build_profile():
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from providers.base import ProviderProfile
@@ -1132,6 +1143,21 @@ def _build_profile():
     class TypeSafeJevProfile(ProviderProfile):
         def create_client(self, **client_kwargs: Any) -> Any:
             return JevClient(**client_kwargs)
+
+        def resolve_api_key_secret(self) -> Optional[Tuple[str, str]]:
+            """A dispatch credential for a custom/aggregator route, never sent to it.
+
+            Core's api_key branch refuses to construct this provider without a key, even
+            though the route's real credential (or anonymous access) is resolved inside
+            `_api_key`. TypeSafe direct still goes through the normal ladder so a missing
+            TypeSafe key is reported; only a non-TypeSafe `auxiliary.approval.base_url`
+            gets this placeholder.
+            """
+            base_url = _configured_approval_base_url()
+            host = (urllib.parse.urlparse(base_url).hostname or "").lower()
+            if host and not _host_matches(host, _TYPESAFE_HOST):
+                return "plugin-dispatch-placeholder", "plugin-dispatch"
+            return None
 
         def fetch_models(self, api_key: str = "", base_url: str = "",
                          **_: Any) -> Optional[List[str]]:

@@ -119,8 +119,8 @@ auxiliary:
 Do **not** add `api_key` or `key_env` under `auxiliary.approval`. Hermes would resolve the task as
 `custom` and bypass this plugin. The plugin reads OpenRouter's credential pool itself.
 
-Stock Hermes still requires the normal `typesafe-jev` credential to construct this provider;
-that dispatch credential is never sent to OpenRouter.
+A custom or aggregator route supplies Hermes a plugin-owned dispatch placeholder that is never
+sent upstream, so `TYPESAFE_API_KEY` is only required for TypeSafe direct.
 
 ### OpenCode Zen — free anonymous request
 
@@ -134,9 +134,9 @@ auxiliary:
     base_url: https://opencode.ai/zen/v1/systemone
 ```
 
-No plugin `key_env` is configured, so OpenCode receives no `Authorization` header. The normal
-`typesafe-jev` credential is still required by stock Hermes for provider dispatch, but is never
-forwarded to OpenCode.
+No plugin `key_env` is configured, so OpenCode receives no `Authorization` header. No
+`TYPESAFE_API_KEY` is needed for this route: Hermes receives a plugin-owned dispatch placeholder
+that is never sent upstream.
 
 Live verification returned HTTP 200 with valid typed answers. See the
 [OpenCode Jev documentation](https://opencode.ai/docs/zen/#jev).
@@ -192,7 +192,12 @@ Put `MY_JEV_PROVIDER_KEY=...` in the environment or `~/.hermes/.env`.
 
 For anonymous upstream access, omit the `plugins` block. A custom host uses only its explicitly
 configured `key_env`; it never inherits TypeSafe or OpenRouter credentials. The custom `base_url`
-is used exactly as written, with no hidden suffix.
+is used exactly as written, with no hidden suffix. No `TYPESAFE_API_KEY` is needed for a custom
+route: Hermes receives a plugin-owned dispatch placeholder that is never sent upstream.
+
+Plain-HTTP loopback endpoints are not supported. The plugin accepts HTTPS on port 443 only, so
+`http://localhost` and other plain-HTTP local endpoints are rejected before any request is made.
+Put a local endpoint behind an HTTPS reverse proxy or tunnel if you need it.
 
 ## Decision log
 
