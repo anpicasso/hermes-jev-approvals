@@ -94,7 +94,7 @@ def spy(**kwargs):
     return real_apply(**kwargs)
 
 
-def fake_post(base_url, body, timeout):
+def fake_post(base_url, body, timeout, deadline=None):
     values = {**BASE, "blast_radius": 1.6}
     return {"answers": answers(values), "model": "jev-test", jev._TRANSPORT_KEY:
             {"attempts": 1, "http_status": 200, "request_id": "contract"}}

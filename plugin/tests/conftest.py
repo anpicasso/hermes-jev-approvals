@@ -9,6 +9,7 @@ suite runs the offline scripts in isolated subprocesses instead (test_scripts.py
 collect_ignore = [
     "test_audit.py",
     "test_boundary.py",
+    "test_context_cap.py",
     "test_hardening.py",
     "test_host_seams.py",
     "test_policy_contract.py",

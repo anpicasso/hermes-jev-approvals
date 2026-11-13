@@ -349,7 +349,7 @@ def guardian(command="ls -la"):
 
 
 def verdict_for(answers, command="ls -la"):
-    jev._post = lambda base_url, body, timeout: {"answers": answers, "model": "jev-1.13.0",
+    jev._post = lambda base_url, body, timeout, deadline=None: {"answers": answers, "model": "jev-1.13.0",
                                                  "usage": {"input_tokens": 1, "output_tokens": 1}}
     return jev.JevClient(api_key="x").chat.completions.create(
         model="jev-latest", messages=guardian(command)).choices[0].message.content
@@ -435,8 +435,8 @@ for label, answers, expected in CASES:
 for label, payload in (("answers is a list", {"answers": []}),
                        ("answers is missing", {"model": "jev-1.13.0"}),
                        ("response is a list", None)):
-    jev._post = ((lambda base_url, body, timeout: []) if payload is None
-                 else (lambda base_url, body, timeout, p=payload: dict(p, model="jev-1.13.0")))
+    jev._post = ((lambda base_url, body, timeout, deadline=None: []) if payload is None
+                 else (lambda base_url, body, timeout, deadline=None, p=payload: dict(p, model="jev-1.13.0")))
     try:
         jev.JevClient(api_key="x").chat.completions.create(model="jev-latest",
                                                            messages=guardian())

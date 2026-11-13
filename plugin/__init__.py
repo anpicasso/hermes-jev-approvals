@@ -94,7 +94,17 @@ _TYPESAFE_HOST = (urllib.parse.urlparse(DEFAULT_BASE_URL).hostname or "").lower(
 # The command text leaves this machine. Cap it so a heredoc or a generated pipeline cannot
 # produce an unbounded request body on exactly the long commands where judgement matters,
 # and mark the cut so the model sees truncation rather than inferring a complete command.
-MAX_COMMAND_CHARS = 4000
+#
+# Sized against Jev's context, not a guess: jev-1.13.0 and jev-1.14.0 both take 64k tokens
+# per request / 32k per question, and `state` counts once against each
+# (docs.typesafe.ai/models#context-length). Tokens per char vary ~6x with content (measured
+# 2026-10-20: code ~0.26, Polish text ~0.57, base64 ~0.72, CJK ~1.64), so no char cap is
+# exact. Start generous; on `400 max_tokens_exceeded` halve and resend, down to a floor that
+# fits even CJK (16k chars ~ 27k tokens). Long-context (262k) is deliberately not used: the
+# docs call it slower and less accurate, and these calls block a turn.
+# Override: plugins.entries.jev-approvals.settings.max_command_chars.
+MAX_COMMAND_CHARS = 64000
+_MIN_COMMAND_CHARS = 16000
 _ELIDED = "\u2026[{n} chars elided]"
 
 # Transient failures only. A 4xx will not improve on a retry, and core escalates to a human
@@ -478,12 +488,15 @@ def _tag_error(exc: Exception, *, attempts: int = 0, status_code: Optional[int] 
     return exc
 
 
-def _post(base_url: str, body: Dict[str, Any], timeout: float) -> Dict[str, Any]:
+def _post(base_url: str, body: Dict[str, Any], timeout: float,
+          deadline: Optional[float] = None) -> Dict[str, Any]:
     """POST with bounded retries on transient failures only.
 
     ponytail: stdlib urllib + a loop, no new dependency. Retries 429/529/5xx and network
     errors under one overall deadline — not `_MAX_ATTEMPTS * timeout`, because this call
-    blocks the agent's turn while a human waits.
+    blocks the agent's turn while a human waits. A caller that resends (context-cap
+    reductions) passes its own absolute monotonic *deadline* so every request shares
+    one budget instead of each starting a fresh one.
     """
     # The credential boundary first: no URL is built, no key is resolved and no
     # connection is opened until base_url has passed it.
@@ -492,7 +505,8 @@ def _post(base_url: str, body: Dict[str, Any], timeout: float) -> Dict[str, Any]
     url = base_url.rstrip("/") + endpoint if endpoint else base_url
     data = json.dumps(body).encode()
     key = _api_key(base_url)
-    deadline = time.monotonic() + min(_DEADLINE_S, max(timeout, 5.0))
+    if deadline is None:
+        deadline = _deadline_for(timeout)
     last: Exception = RuntimeError(f"{PROVIDER_NAME}: no attempt made")
 
     for attempt in range(1, _MAX_ATTEMPTS + 1):
@@ -519,10 +533,18 @@ def _post(base_url: str, body: Dict[str, Any], timeout: float) -> Dict[str, Any]
                 return payload
         except urllib.error.HTTPError as exc:
             retryable = exc.code in _RETRY_STATUS or exc.code >= 500
-            last = RuntimeError(f"{PROVIDER_NAME}: HTTP {exc.code} {_http_hint(exc.code)}")
+            error_class = f"http_{exc.code}"
+            hint = _http_hint(exc.code)
+            if exc.code == 400:
+                try:
+                    if b"max_tokens_exceeded" in (exc.read(2048) or b""):
+                        error_class, hint = "max_tokens_exceeded", "(state over Jev context)"
+                except Exception:
+                    pass
+            last = RuntimeError(f"{PROVIDER_NAME}: HTTP {exc.code} {hint}")
             _tag_error(last, attempts=attempt, status_code=exc.code,
                        request_id=_request_id(getattr(exc, "headers", None)),
-                       error_class=f"http_{exc.code}")
+                       error_class=error_class)
             if not retryable:
                 raise last from exc
         except json.JSONDecodeError as exc:
@@ -541,6 +563,11 @@ def _post(base_url: str, body: Dict[str, Any], timeout: float) -> Dict[str, Any]
                 break
             time.sleep(delay)
     raise last
+
+
+def _deadline_for(timeout: float) -> float:
+    """Absolute monotonic deadline for one judgement, retries included."""
+    return time.monotonic() + min(_DEADLINE_S, max(timeout, 5.0))
 
 
 def _http_hint(code: int) -> str:
@@ -633,6 +660,15 @@ def _redact(text: str) -> str:
     out = _COOKIE_FLAG_RE.sub(r"\1***", out)
     out = _CURL_CRED_RE.sub(r"\1\2:***", out)
     return _FLAG_RE.sub(r"\1[REDACTED]", out)
+
+
+def _command_cap() -> int:
+    """Configured char cap (an operator may go lower; 1000 keeps a cut meaningful)."""
+    try:
+        value = int(_setting("max_command_chars", MAX_COMMAND_CHARS))
+    except (TypeError, ValueError):
+        return MAX_COMMAND_CHARS
+    return max(1000, value)
 
 
 def _truncate(text: str, limit: int = MAX_COMMAND_CHARS) -> Tuple[str, bool]:
@@ -893,27 +929,43 @@ class JevClient:
             # Redact BEFORE truncating, so a cut cannot split a secret into an unmatched
             # fragment, and before anything is serialised toward a third party.
             redacted_command = _redact(command)
-            safe_command, truncated = _truncate(redacted_command)
             safe_description = _redact(description)[:500] if description else ""
-            row.update(command=safe_command[:600], flagged_as=safe_description or None,
-                       truncated=truncated, redacted=(redacted_command != command or
-                                                       safe_description != description),
-                       has_policy=bool(policy), policy_fp=_fingerprint(policy))
-            state: Dict[str, Any] = {"command": safe_command}
-            if safe_description:
-                state["flagged_as"] = safe_description
-            if policy:
-                state["operator_policy"] = policy
-
-            data = _post(self.base_url, {"state": state, "model": model_id,
-                                         "questions": QUESTIONS},
-                         timeout or self._timeout)
+            cap = _command_cap()
+            # One budget for the whole judgement: cap reductions must not each restart it.
+            deadline = _deadline_for(timeout or self._timeout)
+            prior_attempts = 0
+            while True:
+                safe_command, truncated = _truncate(redacted_command, cap)
+                row.update(command=safe_command[:600], flagged_as=safe_description or None,
+                           truncated=truncated, redacted=(redacted_command != command or
+                                                           safe_description != description),
+                           has_policy=bool(policy), policy_fp=_fingerprint(policy))
+                state: Dict[str, Any] = {"command": safe_command}
+                if safe_description:
+                    state["flagged_as"] = safe_description
+                if policy:
+                    state["operator_policy"] = policy
+                try:
+                    data = _post(self.base_url, {"state": state, "model": model_id,
+                                                 "questions": QUESTIONS},
+                                 timeout or self._timeout, deadline=deadline)
+                    break
+                except RuntimeError as exc:
+                    attempts = prior_attempts + int(getattr(exc, "attempts", 0) or 0)
+                    setattr(exc, "attempts", attempts)
+                    if (getattr(exc, "error_class", "") != "max_tokens_exceeded"
+                            or cap <= _MIN_COMMAND_CHARS):
+                        raise
+                    prior_attempts = attempts
+                    cap = max(_MIN_COMMAND_CHARS, cap // 2)
+                    logger.info("%s: command over Jev context, resending capped at %d chars",
+                                PROVIDER_NAME, cap)
             if not isinstance(data, dict):
-                row["attempts"], row["http_status"] = 1, 200
+                row["attempts"], row["http_status"] = prior_attempts + 1, 200
                 raise RuntimeError(f"{PROVIDER_NAME}: response is a {type(data).__name__}, not "
                                    f"an answers object; escalating")
             transport = data.pop(_TRANSPORT_KEY, {})
-            row.update(attempts=int(transport.get("attempts") or 1),
+            row.update(attempts=prior_attempts + int(transport.get("attempts") or 1),
                        http_status=transport.get("http_status", 200),
                        request_id=transport.get("request_id"))
             answers = data.get("answers")

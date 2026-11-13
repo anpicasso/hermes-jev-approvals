@@ -45,7 +45,7 @@ FULL = {"verdict": {"choice": "APPROVE", "confidence": 0.9},
 
 
 def fake_post(answers, calls=None):
-    def _post(base_url, body, timeout):
+    def _post(base_url, body, timeout, deadline=None):
         if calls is not None:
             calls.append(body)
         return {"answers": answers, "model": "jev-1.13.0",
@@ -108,7 +108,7 @@ assert "hunter2hunter2" not in jev._redact("mysql --password=hunter2hunter2")
 flags = jev._redact("psql --host=x --no-password --dbname=postgres --command='SELECT 1'")
 assert "--no-password" in flags and "--dbname=postgres" in flags, flags
 
-long_cmd = "echo " + "A" * 9000 + " && rm -rf /tmp/x"
+long_cmd = "echo " + "A" * 70000 + " && rm -rf /tmp/x"
 cut, was_cut = jev._truncate(long_cmd)
 assert was_cut and len(cut) < len(long_cmd)
 assert "chars elided" in cut, cut
@@ -218,7 +218,7 @@ assert "DENY preserved" in rows[2]["reason"], rows[2]["reason"]
 assert "1.74 >= 1.6" in rows[3]["reason"], rows[3]["reason"]
 assert rows[4]["reason"] == "command truncated before judgement", rows[4]["reason"]
 assert rows[4]["truncated"] is True
-assert "A" * 9000 not in json.dumps(rows[4]), "record stored the full untruncated command"
+assert "A" * 70000 not in json.dumps(rows[4]), "record stored the full untruncated command"
 print("4. every decision recorded with its reason; truncated never APPROVEd  ok")
 
 # --- 5. the log is size-capped, not unbounded ----------------------------------------
