@@ -13,6 +13,7 @@ collect_ignore = [
     "test_hardening.py",
     "test_host_seams.py",
     "test_policy_contract.py",
+    "test_proxy_env.py",
     "test_provider.py",
     "test_real_load.py",
     "test_routes.py",

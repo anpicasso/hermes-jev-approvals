@@ -453,12 +453,16 @@ class _SameOriginRedirects(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-_OPENER = urllib.request.build_opener(_SameOriginRedirects())
-
-
 def _urlopen(req: urllib.request.Request, timeout: float):
-    """The provider's one network seam: stdlib, cross-origin redirects refused."""
-    return _OPENER.open(req, timeout=timeout)
+    """The provider's one network seam: stdlib, cross-origin redirects refused.
+
+    The opener is built per call, not at import: build_opener()'s ProxyHandler snapshots the
+    *_PROXY environment when it is constructed. Hermes discovers plugins before it loads
+    ~/.hermes/.env, so a module-level opener silently ignores an HTTPS_PROXY set there and
+    goes direct, e.g. sending a credential-injecting proxy's placeholder key to the provider
+    (HTTP 401) on every freshly started backend.
+    """
+    return urllib.request.build_opener(_SameOriginRedirects()).open(req, timeout=timeout)
 
 
 _TRANSPORT_KEY = "_jev_transport"
@@ -1109,7 +1113,10 @@ def fetch_decision_models(base_url: str = "", api_key: str = "") -> List[str]:
         if key != "data":
             req.add_header("Authorization",
                            f"Bearer {_api_key(base_url)}")
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        # _urlopen, not urllib.request.urlopen: the stdlib global opener snapshots the proxy
+        # environment on first use (possibly before .env is loaded) and would also let a
+        # cross-origin redirect carry the TypeSafe Authorization header.
+        with _urlopen(req, 10) as resp:
             payload = json.load(resp)
         ids = [str(m.get(field) or "") for m in (payload.get(key) or []) if isinstance(m, dict)]
         return [i for i in ids if i]
