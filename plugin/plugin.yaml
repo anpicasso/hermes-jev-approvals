@@ -23,3 +23,7 @@ config_schema:
   key_env:
     type: string
     description: "Optional environment variable holding the API key sent to a custom Jev decision endpoint; omit it for an anonymous upstream request. For a known aggregator it overrides the preset variable; OpenRouter otherwise uses OPENROUTER_API_KEY."
+  max_command_chars:
+    type: int
+    default: 64000
+    description: "Maximum command characters sent to Jev. The default 64000 matches Jev 1.13/1.14's context; on a max_tokens_exceeded response the cap halves down to 16000 before escalating. Values below 1000 are raised to 1000."

@@ -217,7 +217,9 @@ Environment controls:
 - HTTPS on the default port only.
 - URL credentials, query strings, and fragments are rejected.
 - Cross-origin redirects are rejected.
-- Commands are redacted before egress and capped at 4000 characters.
+- Commands are redacted before egress and capped at 64000 characters by default
+  (`plugins.entries.jev-approvals.settings.max_command_chars`, minimum 1000). A Jev
+  `max_tokens_exceeded` response halves the cap down to 16000 before escalating.
 - A truncated command is never auto-approved.
 - Custom hosts receive only their explicitly configured key, or no key.
 

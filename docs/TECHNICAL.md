@@ -148,10 +148,12 @@ finite and in range, the distribution must cover exactly the requested options a
 approximately one, and the selected option must be an argmax. Scores must stay inside their
 rubric. A malformed response raises and therefore escalates instead of becoming an approval.
 
-**Long commands are capped, and a truncated command is never auto-approved.** 4000 chars,
-head+tail with an explicit `…[N chars elided]` marker so the model sees the cut rather than
-inferring a complete command, and tail-preserving so a payload cannot hide behind filler. A
-verdict reached on a truncated command is downgraded to `ESCALATE` — from
+**Long commands are capped, and a truncated command is never auto-approved.** 64000 chars by
+default (`plugins.entries.jev-approvals.settings.max_command_chars`, minimum 1000), head+tail
+with an explicit `…[N chars elided]` marker so the model sees the cut rather than inferring a
+complete command, and tail-preserving so a payload cannot hide behind filler. If Jev answers
+`max_tokens_exceeded`, the cap halves down to 16000 and the request is resent; a verdict reached
+on a truncated command is downgraded to `ESCALATE` — from
 [`toolgate`](https://github.com/RiskAverseTech/toolgate).
 
 **Guardian inputs are preserved.** The independent live-sandbox study found that a literal
@@ -296,9 +298,10 @@ The OpenRouter filter is load-bearing: decision models are absent from the unfil
 - **It sends the command text and your operator policy to a third-party API.** Commands can
   contain secrets — one command in the corpus behind these metrics contained a live bot
   token. The command is now redacted through core's own redactor plus a CLI-flag pass and
-  capped at 4000 chars; the trusted operator policy is sent in full so a restrictive suffix
-  cannot disappear. Redaction is best-effort: choose a provider you would trust with your
-  shell history. Don't enable this where that's unacceptable.
+  capped at 64000 chars by default (16000 on a context-limit resend); the trusted operator
+  policy is sent in full so a restrictive suffix cannot disappear. Redaction is best-effort:
+  choose a provider you would trust with your shell history. Don't enable this where that's
+  unacceptable.
 - **Approvals only.** Set as a chat provider or any other auxiliary task, it raises rather
   than inventing text. That is deliberate.
 - **Thresholds were tuned by me, on my data**, and are not validated on held-out commands.
