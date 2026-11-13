@@ -13,15 +13,13 @@ import sys, tempfile, time
 import os
 import pathlib
 
+from _host import ensure_host
+
+ensure_host()
+
 # Live verification must not contaminate the user's production decision history.
 os.environ.setdefault("JEV_APPROVAL_LOG",
                       str(pathlib.Path(tempfile.mkdtemp()) / "decisions.jsonl"))
-
-# Resolve Hermes' install and home from the environment so this runs on any machine.
-HERMES_HOME = pathlib.Path(os.environ.get("HERMES_HOME") or (pathlib.Path.home() / ".hermes"))
-HERMES_SRC = pathlib.Path(os.environ.get("HERMES_SRC") or (HERMES_HOME / "hermes-agent"))
-
-sys.path.insert(0, str(HERMES_SRC))
 
 import importlib.util, pathlib
 _PLUGIN_DIR = pathlib.Path(__file__).resolve().parent.parent
@@ -99,25 +97,35 @@ if __name__ == "__main__":
           f"models {tuple(profile.fallback_models)}")
 
     client = profile.create_client(timeout=30.0)
+    assert client is not None, "provider returned no client"
     assert client.HERMES_SKIP_TRANSPORT_WRAP and client.HERMES_SKIP_ASYNC_WRAP
     print(f"  client {type(client).__name__}, both SKIP flags present\n")
 
-    fails, total_ms, tok = [], 0.0, 0
-    print(f"{'verdict':<10}{'ok':<4}{'ms':>6}  command")
-    for command, desc, allowed in CASES:
-        t0 = time.perf_counter()
-        r = client.chat.completions.create(model="jev-latest",
-                                           messages=guardian_messages(command, desc))
-        dt = (time.perf_counter() - t0) * 1000
-        total_ms += dt
-        tok += r.usage.total_tokens
-        got = r.choices[0].message.content
-        ok = got in allowed
-        if not ok:
-            fails.append((command, got, allowed))
-        print(f"{got:<10}{'ok' if ok else 'X':<4}{dt:>6.0f}  {command[:46]}")
+    # Live verdicts need a credential; the refusal contract below does not, so it still runs.
+    try:
+        plug._api_key("")
+        live = True
+    except Exception as exc:
+        live = False
+        print(f"SKIP live verdicts: {str(exc)[:100]}")
 
-    print(f"\n{len(CASES)} commands, {total_ms/len(CASES):.0f}ms avg, {tok} tokens total")
+    fails, total_ms, tok = [], 0.0, 0
+    if live:
+        print(f"{'verdict':<10}{'ok':<4}{'ms':>6}  command")
+        for command, desc, allowed in CASES:
+            t0 = time.perf_counter()
+            r = client.chat.completions.create(model="jev-latest",
+                                               messages=guardian_messages(command, desc))
+            dt = (time.perf_counter() - t0) * 1000
+            total_ms += dt
+            tok += r.usage.total_tokens
+            got = r.choices[0].message.content
+            ok = got in allowed
+            if not ok:
+                fails.append((command, got, allowed))
+            print(f"{got:<10}{'ok' if ok else 'X':<4}{dt:>6.0f}  {command[:46]}")
+
+        print(f"\n{len(CASES)} commands, {total_ms/len(CASES):.0f}ms avg, {tok} tokens total")
 
     # must refuse non-approval prompts rather than inventing text
     print("\nrefusal contract:")
@@ -139,12 +147,13 @@ if __name__ == "__main__":
         print("  ok   streaming: refused")
 
     # usage/shape contract core reads
-    r = client.chat.completions.create(model="jev-latest", messages=guardian_messages("ls"))
-    for attr in ("choices", "usage", "model"):
-        assert hasattr(r, attr), attr
-    assert r.choices[0].finish_reason == "stop"
-    assert r.usage.prompt_tokens >= 0 and r.usage.total_tokens >= 0
-    print("  ok   completion shape: choices/usage/model/finish_reason present")
+    if live:
+        r = client.chat.completions.create(model="jev-latest", messages=guardian_messages("ls"))
+        for attr in ("choices", "usage", "model"):
+            assert hasattr(r, attr), attr
+        assert r.choices[0].finish_reason == "stop"
+        assert r.usage.prompt_tokens >= 0 and r.usage.total_tokens >= 0
+        print("  ok   completion shape: choices/usage/model/finish_reason present")
 
     print(f"\n{len(fails)} failure(s)")
     for c, got, allowed in fails:

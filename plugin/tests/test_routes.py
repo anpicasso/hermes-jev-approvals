@@ -15,12 +15,11 @@ import sys
 import tempfile
 import time
 
+from _host import ensure_host
+
+ensure_host()
+
 os.environ["JEV_APPROVAL_LOG"] = str(pathlib.Path(tempfile.mkdtemp()) / "routes.jsonl")
-for _candidate in (os.environ.get("HERMES_AGENT_DIR"),
-                   os.path.expanduser("~/.hermes/hermes-agent")):
-    if _candidate and os.path.isdir(_candidate):
-        sys.path.insert(0, _candidate)
-        break
 
 _HERE = pathlib.Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location("tsj_routes", _HERE.parent / "__init__.py")

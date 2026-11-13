@@ -10,6 +10,7 @@ collect_ignore = [
     "test_audit.py",
     "test_boundary.py",
     "test_hardening.py",
+    "test_host_seams.py",
     "test_policy_contract.py",
     "test_provider.py",
     "test_real_load.py",

@@ -14,6 +14,7 @@ OFFLINE = (
     "test_audit.py",
     "test_boundary.py",
     "test_hardening.py",
+    "test_host_seams.py",
     "test_policy_contract.py",
 )
 INTEGRATION = {

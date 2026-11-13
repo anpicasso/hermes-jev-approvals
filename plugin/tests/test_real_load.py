@@ -19,11 +19,9 @@ Needs the host on sys.path; no API key required.
 import os
 import sys
 
-for _candidate in (os.environ.get("HERMES_AGENT_DIR"),
-                   os.path.expanduser("~/.hermes/hermes-agent")):
-    if _candidate and os.path.isdir(_candidate):
-        sys.path.insert(0, _candidate)
-        break
+from _host import ensure_host
+
+ensure_host()
 
 try:
     from hermes_cli.plugins import discover_plugins, get_plugin_manager
@@ -251,20 +249,22 @@ finally:
         os.environ.pop(_v, None)
 print("settings.key_env: preset fallback + optional custom auth, no key crossover")
 
-# 6. urllib-based provider errors must carry the same status metadata SDK errors do,
-# or core's auxiliary recovery ladder cannot classify them after our bounded retries.
-from agent.auxiliary_client import (  # noqa: E402
-    _is_auth_error, _is_rate_limit_error, _is_transient_transport_error,
-)
+# 6. urllib-based provider errors must carry the same status metadata SDK errors do, or
+# core's recovery ladder cannot classify them after our bounded retries. The `_is_*`
+# helpers this used to import left agent.auxiliary_client in 0.23; classify_api_error is
+# the single classifier the auxiliary path now consults.
+from agent.error_classifier import FailoverReason, classify_api_error  # noqa: E402
 
-for status, matcher in (
-    (401, _is_auth_error),
-    (429, _is_rate_limit_error),
-    (503, _is_transient_transport_error),
+for status, reason in (
+    (401, FailoverReason.auth),
+    (429, FailoverReason.rate_limit),
+    (503, FailoverReason.overloaded),
 ):
     exc = RuntimeError(f"{PROVIDER}: HTTP {status}")
     setattr(exc, "status_code", status)
-    assert matcher(exc), f"core does not classify status-bearing HTTP {status}"
+    verdict = classify_api_error(exc, provider=PROVIDER)
+    assert verdict.reason == reason, f"core classifies status-bearing HTTP {status} as {verdict.reason}"
+    assert verdict.status_code == status, f"core lost the status of HTTP {status}"
 print("error contract: core classifies status-bearing 401/429/503 exceptions")
 
 print("\nboth registries have the provider, and both routes build our client")
