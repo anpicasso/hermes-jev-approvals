@@ -303,6 +303,16 @@ def _route_for(base_url: str) -> Tuple[str, str, str]:
     return _ROUTES[None] if _host_matches(host, _TYPESAFE_HOST) else ("", "", "")
 
 
+def _secret_env(name: str) -> str:
+    """Use the active profile; only old hosts without the API use process env."""
+    try:
+        from agent.secret_scope import get_secret
+    except ImportError:
+        return (os.environ.get(name) or "").strip()
+    # Do not swallow UnscopedSecretError or fall back to another profile's env.
+    return (get_secret(name) or "").strip()
+
+
 def _api_key(base_url: str = "") -> str:
     """Resolve the key the way Hermes does, not just from os.environ.
 
@@ -323,11 +333,13 @@ def _api_key(base_url: str = "") -> str:
     aggregator = _aggregator_for(host)
     if aggregator:
         provider, default_env = aggregator
+        env_var = str(_setting("key_env", default_env) or "").strip()
+        # Check scope before resolvers that may swallow a missing-scope error.
+        fallback = _secret_env(env_var or default_env)
         key = _key_from_runtime_provider(provider)
         if key:
             return key
-        env_var = str(_setting("key_env", default_env) or "").strip()
-        key = (os.environ.get(env_var) or "").strip() if env_var else ""
+        key = fallback if env_var else ""
         if key:
             return key
         raise RuntimeError(
@@ -337,8 +349,9 @@ def _api_key(base_url: str = "") -> str:
             f"`plugins.entries.{PLUGIN_ID}.settings.key_env`.")
     if host and not _host_matches(host, _TYPESAFE_HOST):
         env_var = str(_setting("key_env", "") or "").strip()
-        key = (os.environ.get(env_var) or "").strip() if env_var else ""
+        key = _secret_env(env_var) if env_var else ""
         return key
+    fallback = _secret_env(SENTINEL_ENV)
     for resolve in (lambda: _key_from_runtime_provider(PROVIDER_NAME), _key_from_dotenv):
         try:
             key = resolve()
@@ -346,7 +359,7 @@ def _api_key(base_url: str = "") -> str:
             key = ""
         if key:
             return key
-    key = (os.environ.get(SENTINEL_ENV) or "").strip()
+    key = fallback
     if key:
         return key
     raise RuntimeError(
@@ -771,8 +784,18 @@ def _truncate(text: str, limit: int = MAX_COMMAND_CHARS) -> Tuple[str, bool]:
     """Head+tail cut with a visible marker, so a payload cannot hide behind filler."""
     if len(text) <= limit:
         return text, False
-    head, tail = limit * 2 // 3, limit // 3
-    return (text[:head] + _ELIDED.format(n=len(text) - head - tail) + text[-tail:]), True
+    if limit < 0:
+        raise ValueError("limit must be non-negative")
+    omitted = len(text) - limit
+    while True:
+        marker = _ELIDED.format(n=omitted)
+        visible = max(0, limit - len(marker))
+        actual_omitted = len(text) - visible
+        if actual_omitted == omitted:
+            head = visible * 2 // 3
+            tail = visible - head
+            return text[:head] + marker[:limit] + (text[-tail:] if tail else ""), True
+        omitted = actual_omitted
 
 
 def _noul(answers: Dict[str, Any], key: str) -> float:
@@ -981,7 +1004,8 @@ class JevClient:
     HERMES_SKIP_ASYNC_WRAP = True
 
     def __init__(self, *, api_key: str = "", base_url: str = "", timeout: float = 30.0, **_: Any):
-        self.api_key = api_key or os.environ.get(SENTINEL_ENV, "")
+        # Compatibility attribute only: transport resolves credentials per request.
+        self.api_key = api_key
         self.base_url = base_url or DEFAULT_BASE_URL
         self._timeout = timeout
         self.is_closed = False

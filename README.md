@@ -7,6 +7,28 @@ served by [TypeSafe's](https://typesafe.ai) Jev decision model.**
 > `approvals.mode: smart`. It cannot chat or generate text, refuses every other task, and
 > registers no hooks. It works with Hermes core as shipped.
 
+## Profile isolation and command bounds
+
+Credential environment lookups use Hermes' active profile secret scope when available;
+an unscoped multiplexed request fails closed rather than using the launch profile's key.
+Older Hermes versions without that API retain process-environment compatibility.
+The command character cap includes the visible elision marker; truncated commands still
+cannot auto-approve.
+
+### Fork contribution history
+
+- Profile-scoped secret reads adapted from
+  [ArchytasEnergyTechnologies/ed08c61](https://github.com/ArchytasEnergyTechnologies/hermes-jev-approvals/commit/ed08c61adea899b8019d0fd53859226c41266bc7).
+  This port keeps current route/pool precedence, checks scope before credential resolvers,
+  and avoids capturing an ambient key in the client constructor. The fork's log-path changes
+  are not included.
+- Exact truncation budget adapted from
+  [starship-s/8e6c6fb](https://github.com/starship-s/hermes-jev-approvals/commit/8e6c6fb8545e058bc610c9b96aa400b99df61f68),
+  with small-cap/zero-tail handling added. Its credential-flow V2 policy is not included.
+
+These are targeted adaptations, not merges of the fork branches; the six-question policy
+and default single-request transport are unchanged.
+
 ## What it does
 
 Hermes already detects commands that need review and asks an auxiliary model for one of three
