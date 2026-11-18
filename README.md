@@ -46,7 +46,7 @@ Malformed or missing answers raise, which makes Hermes escalate to the user.
 ## Install
 
 ```bash
-hermes plugins install anpicasso/hermes-jev-approvals/plugin
+hermes plugins install jev-approvals
 hermes auth add typesafe-jev
 hermes config set approvals.mode smart
 hermes config set auxiliary.approval.provider typesafe-jev
