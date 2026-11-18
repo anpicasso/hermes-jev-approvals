@@ -46,7 +46,7 @@ Malformed or missing answers raise, which makes Hermes escalate to the user.
 ## Install
 
 ```bash
-hermes plugins install anpicasso/hermes-jev-approvals/plugin
+hermes plugins install jev-approvals
 hermes auth add typesafe-jev
 hermes config set approvals.mode smart
 hermes config set auxiliary.approval.provider typesafe-jev
@@ -198,6 +198,34 @@ route: Hermes receives a plugin-owned dispatch placeholder that is never sent up
 Plain-HTTP loopback endpoints are not supported. The plugin accepts HTTPS on port 443 only, so
 `http://localhost` and other plain-HTTP local endpoints are rejected before any request is made.
 Put a local endpoint behind an HTTPS reverse proxy or tunnel if you need it.
+
+### Endpoints with a question limit
+
+For compatible endpoints that accept fewer than six questions per request, opt in:
+
+```yaml
+plugins:
+  entries:
+    jev-approvals:
+      settings:
+        max_questions_per_request: 1  # positive integer; e.g. 3 for a three-question limit
+```
+
+Leaving this unset preserves the original single request. All six safety questions remain:
+smaller limits split them into concurrent requests (at most six), using the same redacted
+state, model, credentials, and shared deadline, including retries and context-cap reductions.
+Policy runs only after every chunk succeeds with complete, valid answers. Any failure or
+incomplete chunk escalates to the host; partial answers never authorize a command.
+
+Each chunk repeats the state, so batching can increase billed tokens and request volume.
+Successful batches sum input/output token usage and record all chunk request IDs. On a
+deadline failure, attempts count only completed requests; running socket calls may finish
+after the caller returns, but their late answers are discarded. A context-cap retry resends
+the full rubric with the reduced state, never mixing answers from different truncations.
+Chunks must return exactly the requested answer keys and consistent model/provider
+metadata. Batched usage aggregates input/output tokens only; other provider-specific
+usage fields are not combined. Custom headers and automatic endpoint/model limit
+detection are not implemented.
 
 ## Decision log
 

@@ -1,5 +1,5 @@
 name: jev-approvals
-version: "0.4.0"
+version: "0.5.0"
 requires_hermes: ">=0.23.1"
 # model-provider is required: it is the only kind providers/ discovery imports, and that
 # import is what registers the profile into PROVIDER_REGISTRY (built at hermes_cli.auth
@@ -23,6 +23,9 @@ config_schema:
   key_env:
     type: string
     description: "Optional environment variable holding the API key sent to a custom Jev decision endpoint; omit it for an anonymous upstream request. For a known aggregator it overrides the preset variable; OpenRouter otherwise uses OPENROUTER_API_KEY."
+  max_questions_per_request:
+    type: int
+    description: "Optional positive integer question limit per request. Unset sends all six questions together; smaller limits use bounded concurrent chunks under one deadline, repeating state and potentially increasing cost. Any failed/incomplete chunk escalates."
   max_command_chars:
     type: int
     default: 64000

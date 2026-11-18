@@ -47,6 +47,9 @@ leaves both URLs untouched, so the endpoint is derived from the host: `openroute
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, wait
+from contextvars import copy_context
+
 import hashlib
 import importlib
 import importlib.util
@@ -569,6 +572,95 @@ def _post(base_url: str, body: Dict[str, Any], timeout: float,
     raise last
 
 
+def _question_limit() -> Optional[int]:
+    """Validate at request time so invalid settings cannot trigger client fallback."""
+    limit = _setting("max_questions_per_request")
+    if limit is not None and (type(limit) is not int or limit <= 0):
+        raise ValueError("max_questions_per_request must be a positive integer")
+    return limit
+
+
+def _post_questions(base_url: str, body: Dict[str, Any], timeout: float,
+                    deadline: float, limit: Optional[int]) -> Dict[str, Any]:
+    """Keep all safety questions; compose policy only after every chunk succeeds."""
+    questions = body["questions"]
+    if limit is None or limit >= len(questions):
+        return _post(base_url, body, timeout, deadline=deadline)
+    if time.monotonic() >= deadline:
+        raise _tag_error(RuntimeError("question batch deadline expired"), error_class="timeout")
+    items = list(questions.items())
+    chunks = [dict(items[i:i + limit]) for i in range(0, len(items), limit)]
+    # ponytail: at most six workers (the fixed safety rubric), no reusable scheduler.
+    executor = ThreadPoolExecutor(max_workers=min(6, len(chunks)))
+    futures = []
+    try:
+        for chunk in chunks:
+            futures.append(executor.submit(copy_context().run, _post, base_url,
+                                           {**body, "questions": chunk}, timeout,
+                                           deadline=deadline))
+        done, pending = wait(futures, timeout=max(0.0, deadline - time.monotonic()))
+        results, errors, attempts = [], [], 0
+        for future in futures:
+            if future not in done:
+                continue
+            try:
+                data = future.result()
+            except Exception as exc:
+                attempts += int(getattr(exc, "attempts", 0) or 0)
+                errors.append(exc)
+            else:
+                transport = data.get(_TRANSPORT_KEY, {}) if isinstance(data, dict) else {}
+                attempts += int(transport.get("attempts") or 1)
+                results.append(data)
+        terminal = next((e for e in errors if getattr(e, "error_class", "") !=
+                         "max_tokens_exceeded"), None)
+        if terminal is not None:
+            # Preserve actionable failures even when another chunk outlives the deadline.
+            setattr(terminal, "attempts", attempts)
+            raise terminal
+        if pending:
+            # Running urllib calls cannot be killed; they retain their socket timeout.
+            # Never consume their late answers or start a new context-cap attempt.
+            raise _tag_error(RuntimeError("question batch deadline expired; escalating"),
+                             attempts=attempts, error_class="timeout")
+        if errors:
+            error = errors[0]  # Only context-cap errors remain, with no pending chunks.
+            setattr(error, "attempts", attempts)
+            raise error
+        merged: Dict[str, Any] = {"answers": {}, "usage": {}}
+        request_ids = []
+        try:
+            for chunk, data in zip(chunks, results):
+                answers = data.get("answers") if isinstance(data, dict) else None
+                if (not isinstance(answers, dict) or set(answers) != set(chunk)
+                        or any(not isinstance(answer, dict) for answer in answers.values())):
+                    raise ValueError("question chunk has missing or unexpected answers")
+                merged["answers"].update(answers)
+                for field in ("model", "provider"):
+                    value = data.get(field)
+                    if field in merged and merged[field] != value:
+                        raise ValueError(f"question chunks disagree on {field}")
+                    merged[field] = value
+                usage = data.get("usage", {})
+                if not isinstance(usage, dict):
+                    raise ValueError("question chunk usage is not an object")
+                for field in ("input_tokens", "output_tokens"):
+                    value = usage.get(field, 0)
+                    if type(value) is not int or value < 0:
+                        raise ValueError(f"question chunk has invalid {field}")
+                    merged["usage"][field] = merged["usage"].get(field, 0) + value
+                request_ids.append(data.get(_TRANSPORT_KEY, {}).get("request_id"))
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise _tag_error(RuntimeError(f"{exc}; escalating"), attempts=attempts,
+                             status_code=200, error_class="invalid_batch") from exc
+        merged["model"] = merged["model"] or body["model"]
+        merged[_TRANSPORT_KEY] = {"attempts": attempts, "http_status": 200,
+                                  "request_id": None, "request_ids": request_ids}
+        return merged
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+
 def _deadline_for(timeout: float) -> float:
     """Absolute monotonic deadline for one judgement, retries included."""
     return time.monotonic() + min(_DEADLINE_S, max(timeout, 5.0))
@@ -853,7 +945,7 @@ def _audit_row(*, route: str = "", model_requested: str = "") -> Dict[str, Any]:
         "rule": None, "reason": None, "model": None,
         "model_requested": model_requested or None, "provider": None,
         "route": route or None, "latency_ms": 0, "attempts": 0,
-        "http_status": None, "request_id": None, "error_class": None,
+        "http_status": None, "request_id": None, "request_ids": None, "error_class": None,
         "error": None, "policy_version": _POLICY_VERSION, "policy_fp": None,
         "has_policy": False, "questions_fp": _QUESTIONS_FP,
         "confidence": None, "blast_radius": None, "self_advocating": None,
@@ -935,6 +1027,7 @@ class JevClient:
             redacted_command = _redact(command)
             safe_description = _redact(description)[:500] if description else ""
             cap = _command_cap()
+            question_limit = _question_limit()
             # One budget for the whole judgement: cap reductions must not each restart it.
             deadline = _deadline_for(timeout or self._timeout)
             prior_attempts = 0
@@ -950,9 +1043,9 @@ class JevClient:
                 if policy:
                     state["operator_policy"] = policy
                 try:
-                    data = _post(self.base_url, {"state": state, "model": model_id,
-                                                 "questions": QUESTIONS},
-                                 timeout or self._timeout, deadline=deadline)
+                    data = _post_questions(
+                        self.base_url, {"state": state, "model": model_id, "questions": QUESTIONS},
+                        timeout or self._timeout, deadline=deadline, limit=question_limit)
                     break
                 except RuntimeError as exc:
                     attempts = prior_attempts + int(getattr(exc, "attempts", 0) or 0)
@@ -972,6 +1065,8 @@ class JevClient:
             row.update(attempts=prior_attempts + int(transport.get("attempts") or 1),
                        http_status=transport.get("http_status", 200),
                        request_id=transport.get("request_id"))
+            if "request_ids" in transport:
+                row["request_ids"] = transport["request_ids"]
             answers = data.get("answers")
             if not isinstance(answers, dict):
                 raise RuntimeError(f"{PROVIDER_NAME}: response carries no answers object "

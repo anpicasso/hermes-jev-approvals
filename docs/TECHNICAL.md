@@ -85,7 +85,9 @@ self-advocacy check runs before the policy check.
 
 ## How the verdict is produced
 
-One request, six questions, answered in parallel:
+By default, one request carries six questions, answered in parallel. Optional
+`max_questions_per_request` splits the same rubric into concurrent bounded chunks
+under one shared deadline; all answers must succeed before policy runs:
 
 | question | type | role |
 |---|---|---|
@@ -107,8 +109,10 @@ Then policy in **code**, in this order:
 Steps 1, 2, 3 and 5 only ever downgrade toward human review. Step 4 upgrades, but requires
 an explicit operator policy *and* a non-catastrophic blast radius.
 
-Six questions cost the same as one: 347 ms average across the 20-case suite, versus 439 ms
-when there were four. Jev answers independent questions in the same request in parallel.
+The original single-request benchmark averaged 347 ms across the 20-case suite,
+versus 439 ms when there were four questions. Jev answers independent questions in
+one request in parallel; these latency measurements do not establish equal billing.
+Opt-in chunking repeats state and may increase token and request costs.
 
 ### Hardening
 
