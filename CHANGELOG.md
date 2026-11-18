@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.1
+
+- Resolve endpoint credentials through Hermes' active profile secret scope, failing closed instead of borrowing another profile's environment. Adapted from ArchytasEnergyTechnologies/hermes-jev-approvals commit ed08c61adea899b8019d0fd53859226c41266bc7.
+- Include the omission marker within the exact command character cap. Inspired by starship-s/hermes-jev-approvals commit 8e6c6fb8545e058bc610c9b96aa400b99df61f68; implemented against the current transport without adopting the fork's policy changes.
+
 ## 0.5.0
 
 ### Added
